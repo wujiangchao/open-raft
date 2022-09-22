@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ProjectModuleManager">
+    <modules>
+      <module fileurl="file://$PROJECT_DIR$/.idea/open-raft.iml" filepath="$PROJECT_DIR$/.idea/open-raft.iml" />
+      <module fileurl="file://$PROJECT_DIR$/raft-core/raft-core.iml" filepath="$PROJECT_DIR$/raft-core/raft-core.iml" />
+      <module fileurl="file://$PROJECT_DIR$/raft-demo/raft-demo.iml" filepath="$PROJECT_DIR$/raft-demo/raft-demo.iml" />
+    </modules>
+  </component>
+</project>
