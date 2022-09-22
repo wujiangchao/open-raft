@@ -144,6 +144,13 @@
                 <version>${commons.lang.version}</version>
             </dependency>
 
+            <!-- rocksdb -->
+            <dependency>
+                <groupId>org.rocksdb</groupId>
+                <artifactId>rocksdbjni</artifactId>
+                <version>${rocksdb.version}</version>
+            </dependency>
+
             <!-- java thread affinity -->
             <dependency>
                 <groupId>net.openhft</groupId>
