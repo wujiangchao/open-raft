@@ -7,8 +7,6 @@ import com.open.raft.util.Copiable;
 import com.open.raft.util.RaftServiceLoader;
 import com.open.raft.util.Utils;
 
-import javax.security.auth.login.Configuration;
-
 
 /**
  * @Date 2022/7/8 10:11
