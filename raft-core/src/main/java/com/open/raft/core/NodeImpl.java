@@ -72,6 +72,19 @@ public class NodeImpl implements INode {
         return false;
     }
 
+
+    /**
+     * the handler of electionTimeout,called by electionTimeoutTimer
+     * when elctionTimeOut
+     */
+    private void handleElectionTimeout() {
+
+    }
+
+    private void preVote() {
+
+    }
+
     @Override
     public void shutdown() {
 
