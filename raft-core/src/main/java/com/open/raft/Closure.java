@@ -14,19 +14,19 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.open.raft.util;
+package com.open.raft;
 
 /**
- * Copiable mark interface.
- * <p>
- * 2018-Apr-03 11:15:34 AM
+ * Callback closure.
  *
- * @param <T>
+ * 2018-Apr-03 11:07:05 AM
  */
-public interface Copiable<T> {
+public interface Closure {
 
     /**
-     * Copy current object(deep-clone).
+     * Called when task is done.
+     *
+     * @param status the task status.
      */
-    T copy();
+    void run(final Status status);
 }

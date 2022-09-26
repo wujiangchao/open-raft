@@ -2,6 +2,7 @@ package com.open.raft.option;
 
 
 import com.open.raft.RaftServiceFactory;
+import com.open.raft.StateMachine;
 import com.open.raft.core.ElectionPriority;
 import com.open.raft.util.Copiable;
 import com.open.raft.util.RaftServiceLoader;
@@ -55,7 +56,7 @@ public class NodeOptions extends RpcOptions implements Copiable<NodeOptions> {
     /**
      * The specific StateMachine implemented your business logic, which must be a valid instance.
      */
-//    private StateMachine fsm;
+    private StateMachine fsm;
 
     /**
      * Describe a specific LogStorage in format ${type}://${parameters}
@@ -234,13 +235,13 @@ public class NodeOptions extends RpcOptions implements Copiable<NodeOptions> {
         this.snapshotIntervalSecs = snapshotIntervalSecs;
     }
 
-//    public StateMachine getFsm() {
-//        return fsm;
-//    }
-//
-//    public void setFsm(StateMachine fsm) {
-//        this.fsm = fsm;
-//    }
+    public StateMachine getFsm() {
+        return fsm;
+    }
+
+    public void setFsm(StateMachine fsm) {
+        this.fsm = fsm;
+    }
 
     public String getLogUri() {
         return logUri;

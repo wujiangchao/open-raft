@@ -1,27 +1,11 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements.  See the NOTICE file distributed with
- * this work for additional information regarding copyright ownership.
- * The ASF licenses this file to You under the Apache License, Version 2.0
- * (the "License"); you may not use this file except in compliance with
- * the License.  You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+
 package com.open.raft.entity;
 
-import com.alipay.sofa.jraft.core.ElectionPriority;
-import com.alipay.sofa.jraft.util.AsciiStringUtil;
-import com.alipay.sofa.jraft.util.Copiable;
-import com.alipay.sofa.jraft.util.CrcUtil;
-import com.alipay.sofa.jraft.util.Endpoint;
-import com.alipay.sofa.jraft.util.Utils;
+import com.open.raft.core.ElectionPriority;
+import com.open.raft.util.Constants;
+import com.open.raft.util.Copiable;
+import com.open.raft.util.CrcUtil;
+import com.open.raft.util.Endpoint;
 import org.apache.commons.lang.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -33,7 +17,6 @@ import java.io.Serializable;
  *  PeerId 表示一个 raft 协议的参与者（leader/follower/candidate etc.)， 它由三元素组成： ip:port:index， IP 就是节点的 IP，
  *  port 就是端口，index 表示同一个端口的序列号，目前没有用到，总被认为是 0。预留此字段是为了支持同一个端口启动不同的 raft 节点，
  *  通过 index 区分。
- * @author boyan (boyan@alibaba-inc.com)
  *
  * 2018-Mar-12 3:27:37 PM
  */
@@ -44,7 +27,7 @@ public class PeerId implements Copiable<PeerId>, Serializable, Checksum {
     private static final Logger LOG              = LoggerFactory.getLogger(PeerId.class);
 
     /** Peer address. */
-    private Endpoint            endpoint         = new Endpoint(Utils.IP_ANY, 0);
+    private Endpoint            endpoint         = new Endpoint(Constants.IP_ANY, 0);
     /** Index in same addr, default is 0. */
     private int                 idx;
     /** Cached toString result.   ip:port */
@@ -156,7 +139,7 @@ public class PeerId implements Copiable<PeerId>, Serializable, Checksum {
      * Returns true when ip is ANY_IP, port is zero and idx is zero too.
      */
     public boolean isEmpty() {
-        return getIp().equals(Utils.IP_ANY) && getPort() == 0 && this.idx == 0;
+        return getIp().equals(Constants.IP_ANY) && getPort() == 0 && this.idx == 0;
     }
 
     @Override

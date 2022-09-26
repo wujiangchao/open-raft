@@ -1,9 +1,13 @@
 package com.open.raft.util;
 
+import com.alipay.remoting.NamedThreadFactory;
 import io.netty.util.internal.SystemPropertyUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.concurrent.Future;
+import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -25,9 +29,49 @@ public class Utils {
                     .getRuntime().availableProcessors());
 
     /**
+     * Default jraft closure executor pool minimum size, CPUs by default.
+     */
+    public static final int           MIN_CLOSURE_EXECUTOR_POOL_SIZE      = SystemPropertyUtil.getInt(
+            "raft.closure.threadpool.size.min",
+            CPUS);
+
+    /**
+     * Default jraft closure executor pool maximum size.
+     */
+    public static final int           MAX_CLOSURE_EXECUTOR_POOL_SIZE      = SystemPropertyUtil.getInt(
+            "raft.closure.threadpool.size.max",
+            Math.max(100, CPUS * 5));
+
+    /**
      * Gets the current monotonic time in milliseconds.
      */
     public static long monotonicMs() {
         return TimeUnit.NANOSECONDS.toMillis(System.nanoTime());
+    }
+
+
+    /**
+     * Global thread pool to run closure.
+     */
+    private static ThreadPoolExecutor CLOSURE_EXECUTOR                    = ThreadPoolUtil
+            .newBuilder()
+            .poolName("RAFT_CLOSURE_EXECUTOR")
+            .enableMetric(true)
+            .coreThreads(
+                    MIN_CLOSURE_EXECUTOR_POOL_SIZE)
+            .maximumThreads(
+                    MAX_CLOSURE_EXECUTOR_POOL_SIZE)
+            .keepAliveSeconds(60L)
+            .workQueue(new SynchronousQueue<>())
+            .threadFactory(
+                    new NamedThreadFactory(
+                            "Raft-Closure-Executor-", true))
+            .build();
+
+    /**
+     * Run a task in thread pool,returns the future object.
+     */
+    public static Future<?> runInThread(final Runnable runnable) {
+        return CLOSURE_EXECUTOR.submit(runnable);
     }
 }
