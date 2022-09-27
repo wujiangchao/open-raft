@@ -1,19 +1,29 @@
 package com.open.raft.core;
 
+import com.google.protobuf.Message;
 import com.open.raft.FSMCaller;
 import com.open.raft.INode;
 import com.open.raft.RaftServiceFactory;
 import com.open.raft.Status;
 import com.open.raft.closure.ClosureQueue;
 import com.open.raft.closure.ClosureQueueImpl;
+import com.open.raft.core.done.OnPreVoteRpcDone;
+import com.open.raft.core.done.OnRequestVoteRpcDone;
 import com.open.raft.entity.LeaderChangeContext;
 import com.open.raft.entity.LogId;
 import com.open.raft.entity.NodeId;
 import com.open.raft.entity.PeerId;
 import com.open.raft.error.RaftError;
 import com.open.raft.option.FSMCallerOptions;
+import com.open.raft.option.LogManagerOptions;
 import com.open.raft.option.NodeOptions;
 import com.open.raft.option.RaftOptions;
+import com.open.raft.rpc.RaftServerService;
+import com.open.raft.rpc.RpcRequestClosure;
+import com.open.raft.rpc.RpcRequests;
+import com.open.raft.rpc.RpcResponseClosure;
+import com.open.raft.storage.LogManager;
+import com.open.raft.storage.LogStorage;
 import com.open.raft.util.Requires;
 import com.open.raft.util.Utils;
 import com.open.raft.util.concurrent.NodeReadWriteLock;
@@ -29,7 +39,7 @@ import java.util.concurrent.locks.ReadWriteLock;
  * @Date 2022/9/22 18:51
  * @Author jack wu
  */
-public class NodeImpl implements INode {
+public class NodeImpl implements INode, RaftServerService {
 
     private static final Logger LOG = LoggerFactory.getLogger(NodeImpl.class);
 
@@ -75,8 +85,10 @@ public class NodeImpl implements INode {
 
 
     private FSMCaller fsmCaller;
-    private ClosureQueue closureQueue;
+    private LogManager logManager;
+    private LogStorage logStorage;
 
+    private ClosureQueue closureQueue;
 
     public NodeImpl(String groupId, PeerId serverId) {
         this.groupId = groupId;
@@ -107,7 +119,7 @@ public class NodeImpl implements INode {
 
 
         //fsmCaller封装对业务 StateMachine 的状态转换的调用以及日志的写入等
-        this.fsmCaller = new FSMCallerImpl();
+        this.fsmCaller = new FSMCallerImpl(lastAppliedIndex, applyingIndex);
 
         //初始化日志存储功能
         if (!initLogStorage()) {
@@ -127,6 +139,20 @@ public class NodeImpl implements INode {
         return false;
     }
 
+    private boolean initLogStorage() {
+        Requires.requireNonNull(this.fsmCaller, "Null fsm caller");
+        this.logStorage = this.serviceFactory.createLogStorage(this.options.getLogUri(), this.raftOptions);
+        this.logManager = new LogManagerImpl();
+        final LogManagerOptions opts = new LogManagerOptions();
+        opts.setLogEntryCodecFactory(this.serviceFactory.createLogEntryCodecFactory());
+        opts.setLogStorage(this.logStorage);
+        opts.setConfigurationManager(this.configManager);
+        opts.setFsmCaller(this.fsmCaller);
+        opts.setNodeMetrics(this.metrics);
+        opts.setDisruptorBufferSize(this.raftOptions.getDisruptorBufferSize());
+        opts.setRaftOptions(this.raftOptions);
+        return this.logManager.init(opts);
+    }
 
     private boolean initFSMCaller(final LogId bootstrapId) {
         if (this.fsmCaller == null) {
@@ -182,8 +208,81 @@ public class NodeImpl implements INode {
         }
     }
 
+    /**
+     * 之所以要增加一个preVote的步骤，是为了解决系统中防止某个节点由于无法和leader同步，不断发起投票，抬升自己的Term，
+     * 导致自己Term比Leader的Term还大，(更高的Term在Raft协议中代表更“新“的日志)然后迫使Leader放弃Leader身份，
+     * 开始新一轮的选举。而preVote则强调节点必须获得半数以上的投票才能开始发起新一轮的选举
+     * <p>
+     * in writeLock
+     */
     private void preVote() {
+        long oldTerm;
+        try {
+            LOG.info("Node {} term {} start preVote.", getNodeId(), this.currTerm);
+            //当前的节点不能再安装快照的时候进行选举
+            if (this.snapshotExecutor != null && this.snapshotExecutor.isInstallingSnapshot()) {
+                LOG.warn(
+                        "Node {} term {} doesn't do preVote when installing snapshot as the configuration may be out of date.",
+                        getNodeId(), this.currTerm);
+                return;
+            }
+            //conf里面记录了集群节点的信息，如果当前的节点不包含在集群里说明是由问题的
+            if (!this.conf.contains(this.serverId)) {
+                LOG.warn("Node {} can't do preVote as it is not in conf <{}>.", getNodeId(), this.conf);
+                return;
+            }
+            //设置一下当前的任期
+            oldTerm = this.currTerm;
 
+        } finally {
+            this.writeLock.unlock();
+        }
+
+        //返回最新的log实体类
+        final LogId lastLogId = this.logManager.getLastLogId(true);
+
+        boolean doUnlock = true;
+        this.writeLock.lock();
+        try {
+            // pre_vote need defense ABA after unlock&writeLock
+            //因为在上面没有重新加锁的间隙里可能会被别的线程改变了，所以这里校验一下
+            if (oldTerm != this.currTerm) {
+                LOG.warn("Node {} raise term {} when get lastLogId.", getNodeId(), this.currTerm);
+                return;
+            }
+            //初始化预投票投票箱
+            this.prevVoteCtx.init(this.conf.getConf(), this.conf.isStable() ? null : this.conf.getOldConf());
+            for (final PeerId peer : this.conf.listPeers()) {
+                //如果遍历的节点是当前节点就跳过
+                if (peer.equals(this.serverId)) {
+                    continue;
+                }
+                //如果遍历的节点因为宕机或者手动下线等原因连接不上也跳过
+                if (!this.rpcService.connect(peer.getEndpoint())) {
+                    LOG.warn("Node {} channel init failed, address={}.", getNodeId(), peer.getEndpoint());
+                    continue;
+                }
+                //设置一个回调的类
+                final OnPreVoteRpcDone done = new OnPreVoteRpcDone(peer, this, term);
+
+                //向被遍历到的这个节点发送一个预投票的请求
+                done.request = RequestVoteRequest.newBuilder() //
+                        .setPreVote(true) // it's a pre-vote request.
+                        .setGroupId(this.groupId) //
+                        .setServerId(this.serverId.toString()) //
+                        .setPeerId(peer.toString()) //
+                        .setTerm(this.currTerm + 1) // next term
+                        .setLastLogIndex(lastLogId.getIndex()) //
+                        .setLastLogTerm(lastLogId.getTerm()) //
+                        .build();
+                //最后在发送成功收到响应之后会回调OnPreVoteRpcDone的run方法
+                this.rpcService.preVote(peer.getEndpoint(), done.request, done);
+            }
+        } finally {
+            if (doUnlock) {
+                this.writeLock.unlock();
+            }
+        }
     }
 
     private void resetLeaderId(final PeerId newLeaderId, final Status status) {
@@ -297,5 +396,268 @@ public class NodeImpl implements INode {
         final int prevTargetPriority = this.targetPriority;
         this.targetPriority = Math.max(ElectionPriority.MinValue, (this.targetPriority - gap));
         LOG.info("Node {} priority decay, from: {}, to: {}.", getNodeId(), prevTargetPriority, this.targetPriority);
+    }
+
+    /**
+     * handle pre-vote request
+     * 首先调用isActive，看一下当前节点是不是正常的节点，不是正常节点要返回Error信息
+     * 将请求传过来的ServerId解析到candidateId实例中
+     * 校验当前的节点如果有leader，并且leader有效的，那么就直接break，返回granted为false
+     * 如果当前的任期大于请求的任期，那么调用checkReplicator检查自己是不是leader，如果是leader，
+     * 那么将当前节点从failureReplicators移除，重新加入到replicatorMap中。然后直接break
+     * 请求任期和当前任期相等的情况也要校验，只是不用break
+     * 如果请求的日志比当前的最新的日志还要新，那么返回granted为true，代表授权成功
+     *
+     * @param request data of the pre vote
+     * @return
+     */
+    @Override
+    public Message handlePreVoteRequest(RpcRequests.RequestVoteRequest request) {
+        boolean doUnlock = true;
+        this.writeLock.lock();
+        try {
+            if (!this.state.isActive()) {
+                LOG.warn("Node {} is not in active state, currTerm={}.", getNodeId(), this.currTerm);
+                return RpcFactoryHelper //
+                        .responseFactory() //
+                        .newResponse(RpcRequests.RequestVoteResponse.getDefaultInstance(), RaftError.EINVAL,
+                                "Node %s is not in active state, state %s.", getNodeId(), this.state.name());
+            }
+            final PeerId candidateId = new PeerId();
+            //发送过来的request请求携带的ServerId格式不能错
+            if (!candidateId.parse(request.getServerId())) {
+                LOG.warn("Node {} received PreVoteRequest from {} serverId bad format.", getNodeId(),
+                        request.getServerId());
+                return RpcFactoryHelper //
+                        .responseFactory() //
+                        .newResponse(RpcRequests.RequestVoteResponse.getDefaultInstance(), RaftError.EINVAL,
+                                "Parse candidateId failed: %s.", request.getServerId());
+            }
+            boolean granted = false;
+
+            do {
+                //节点不在集群中
+                if (!this.conf.contains(candidateId)) {
+                    LOG.warn("Node {} ignore PreVoteRequest from {} as it is not in conf <{}>.", getNodeId(),
+                            request.getServerId(), this.conf);
+                    break;
+                }
+                //已经有leader的情况
+                if (this.leaderId != null && !this.leaderId.isEmpty() && isCurrentLeaderValid()) {
+                    LOG.info(
+                            "Node {} ignore PreVoteRequest from {}, term={}, currTerm={}, because the leader {}'s lease is still valid.",
+                            getNodeId(), request.getServerId(), request.getTerm(), this.currTerm, this.leaderId);
+                    break;
+                }
+                //请求的任期小于当前的任期
+                if (request.getTerm() < this.currTerm) {
+                    LOG.info("Node {} ignore PreVoteRequest from {}, term={}, currTerm={}.", getNodeId(),
+                            request.getServerId(), request.getTerm(), this.currTerm);
+                    // A follower replicator may not be started when this node become leader, so we must check it.
+                    //如果请求term小于当前term,当前节点刚刚选举成为leader时可能没有启动复制任务，校验复制任务
+                    checkReplicator(candidateId);
+                    break;
+                }
+                // A follower replicator may not be started when this node become leader, so we must check it.
+                // check replicator state
+                checkReplicator(candidateId);
+
+                doUnlock = false;
+                this.writeLock.unlock();
+                //获取最新的日志
+                final LogId lastLogId = this.logManager.getLastLogId(true);
+
+                doUnlock = true;
+                this.writeLock.lock();
+                final LogId requestLastLogId = new LogId(request.getLastLogIndex(), request.getLastLogTerm());
+                //比较当前节点的日志完整度和请求节点的日志完整度
+                granted = requestLastLogId.compareTo(lastLogId) >= 0;
+                LOG.info(
+                        "Node {} received PreVoteRequest from {}, term={}, currTerm={}, granted={}, requestLastLogId={}, lastLogId={}.",
+                        getNodeId(), request.getServerId(), request.getTerm(), this.currTerm, granted, requestLastLogId,
+                        lastLogId);
+            } while (false);
+            return RpcRequests.RequestVoteResponse.newBuilder() //
+                    .setTerm(this.currTerm) //
+                    .setGranted(granted) //
+                    .build();
+
+        } finally {
+            if (doUnlock) {
+                this.writeLock.unlock();
+            }
+        }
+        return null;
+    }
+
+    @Override
+    public Message handleRequestVoteRequest(RpcRequests.RequestVoteRequest request) {
+        return null;
+    }
+
+    @Override
+    public Message handleAppendEntriesRequest(RpcRequests.AppendEntriesRequest request, RpcRequestClosure done) {
+        return null;
+    }
+
+    @Override
+    public Message handleInstallSnapshot(RpcRequests.InstallSnapshotRequest request, RpcRequestClosure done) {
+        return null;
+    }
+
+    @Override
+    public Message handleTimeoutNowRequest(RpcRequests.TimeoutNowRequest request, RpcRequestClosure done) {
+        return null;
+    }
+
+    @Override
+    public void handleReadIndexRequest(RpcRequests.ReadIndexRequest request, RpcResponseClosure<RpcRequests.ReadIndexResponse> done) {
+
+    }
+
+
+    /**
+     * 第一重试校验了当前的状态，如果不是FOLLOWER那么就不能发起选举。因为如果是leader节点，那么它不会选举，只能stepdown下台，
+     * 把自己变成FOLLOWER后重新选举；如果是CANDIDATE，那么只能进行由FOLLOWER发起的投票，所以从功能上来说，只能FOLLOWER发起选举。
+     * 从Raft 的设计上来说也只能由FOLLOWER来发起选举，所以这里进行了校验。
+     * 第二重校验主要是校验发送请求时的任期和接受到响应时的任期还是不是一个，如果不是那么说明已经不是上次那轮的选举了，是一次失效的选举
+     * 第三重校验是校验响应返回的任期是不是大于当前的任期，如果大于当前的任期，那么重置当前的leade
+     *
+     * @param peerId
+     * @param term
+     * @param response
+     */
+    public void handlePreVoteResponse(final PeerId peerId, final long term, final RpcRequests.RequestVoteResponse response) {
+        boolean doUnlock = true;
+        this.writeLock.lock();
+        try {
+            //只有follower才可以尝试发起选举
+            if (this.state != State.STATE_FOLLOWER) {
+                LOG.warn("Node {} received invalid PreVoteResponse from {}, state not in STATE_FOLLOWER but {}.",
+                        getNodeId(), peerId, this.state);
+                return;
+            }
+            if (term != this.currTerm) {
+                LOG.warn("Node {} received invalid PreVoteResponse from {}, term={}, currTerm={}.", getNodeId(),
+                        peerId, term, this.currTerm);
+                return;
+            }
+            //如果返回的任期大于当前的任期，那么这次请求也是无效的
+            if (response.getTerm() > this.currTerm) {
+                LOG.warn("Node {} received invalid PreVoteResponse from {}, term {}, expect={}.", getNodeId(), peerId,
+                        response.getTerm(), this.currTerm);
+                stepDown(response.getTerm(), false, new Status(RaftError.EHIGHERTERMRESPONSE,
+                        "Raft node receives higher term pre_vote_response."));
+                return;
+            }
+            LOG.info("Node {} received PreVoteResponse from {}, term={}, granted={}.", getNodeId(), peerId,
+                    response.getTerm(), response.getGranted());
+            // check granted quorum?
+            if (response.getGranted()) {
+                //校验完之后响应的节点会返回一个授权，如果授权通过的话则调用Ballot的grant方法，表示给当前的节点投一票
+                this.prevVoteCtx.grant(peerId);
+                //得到了半数以上的响应
+                if (this.prevVoteCtx.isGranted()) {
+                    doUnlock = false;
+                    //进行选举
+                    electSelf();
+                }
+            }
+        } finally {
+            if (doUnlock) {
+                this.writeLock.unlock();
+            }
+        }
+    }
+
+    /**
+     * 对当前的节点进行校验，如果当前节点不在集群里面则不进行选举
+     * 因为是Follower发起的选举，所以大概是因为要进行正式选举了，把预选举定时器关掉
+     * 清空leader再进行选举，注意这里会把votedId设置为当前节点，代表自己参选
+     * 开始发起投票定时器，因为可能投票失败需要循环发起投票，voteTimer里面会根据当前的CANDIDATE状态调用electSelf进行选举
+     * 调用init方法初始化投票箱，这里和prevVoteCtx是一样的
+     * 遍历所有节点，然后向其他集群节点发送RequestVoteRequest请求，这里也是和preVote一样的，请求是被RequestVoteRequestProcessor处理器处理的。
+     * 如果有超过半数以上的节点投票选中，那么就调用becomeLeader晋升为leader
+     */
+    // should be in writeLock
+    private void electSelf() {
+        long oldTerm;
+        try {
+            LOG.info("Node {} start vote and grant vote self, term={}.", getNodeId(), this.currTerm);
+            //1. 如果当前节点不在集群里面则不进行选举
+            if (!this.conf.contains(this.serverId)) {
+                LOG.warn("Node {} can't do electSelf as it is not in {}.", getNodeId(), this.conf);
+                return;
+            }
+            //2. 大概是因为要进行正式选举了，把预选举关掉
+            if (this.state == State.STATE_FOLLOWER) {
+                LOG.debug("Node {} stop election timer, term={}.", getNodeId(), this.currTerm);
+                this.electionTimer.stop();
+            }
+
+            //3. 清空leader
+            resetLeaderId(PeerId.emptyPeer(), new Status(RaftError.ERAFTTIMEDOUT,
+                    "A follower's leader_id is reset to NULL as it begins to request_vote."));
+            this.state = State.STATE_CANDIDATE;
+            this.currTerm++;
+
+            this.votedId = this.serverId.copy();
+            LOG.debug("Node {} start vote timer, term={} .", getNodeId(), this.currTerm);
+            //4. 开始发起投票定时器，因为可能投票失败需要循环发起投票
+            this.voteTimer.start();
+            //5. 初始化投票箱
+            this.voteCtx.init(this.conf.getConf(), this.conf.isStable() ? null : this.conf.getOldConf());
+            oldTerm = this.currTerm;
+        } finally {
+            this.writeLock.unlock();
+        }
+
+        final LogId lastLogId = this.logManager.getLastLogId(true);
+
+        this.writeLock.lock();
+        try {
+            // vote need defense ABA after unlock&writeLock
+            if (oldTerm != this.currTerm) {
+                LOG.warn("Node {} raise term {} when getLastLogId.", getNodeId(), this.currTerm);
+                return;
+            }
+            //6. 遍历所有节点
+            for (final PeerId peer : this.conf.listPeers()) {
+                if (peer.equals(this.serverId)) {
+                    continue;
+                }
+                if (!this.rpcService.connect(peer.getEndpoint())) {
+                    LOG.warn("Node {} channel init failed, address={}.", getNodeId(), peer.getEndpoint());
+                    continue;
+                }
+                final OnRequestVoteRpcDone done = new OnRequestVoteRpcDone(peer, this.currTerm, this);
+                done.request = RpcRequests.RequestVoteRequest.newBuilder() //
+                        .setPreVote(false) // It's not a pre-vote request.
+                        .setGroupId(this.groupId) //
+                        .setServerId(this.serverId.toString()) //
+                        .setPeerId(peer.toString()) //
+                        .setTerm(this.currTerm) //
+                        .setLastLogIndex(lastLogId.getIndex()) //
+                        .setLastLogTerm(lastLogId.getTerm()) //
+                        .build();
+                this.rpcService.requestVote(peer.getEndpoint(), done.request, done);
+            }
+
+            this.metaStorage.setTermAndVotedFor(this.currTerm, this.serverId);
+            this.voteCtx.grant(this.serverId);
+            if (this.voteCtx.isGranted()) {
+                //7. 投票成功，那么就晋升为leader
+                becomeLeader();
+            }
+        } finally {
+            this.writeLock.unlock();
+        }
+
+    }
+
+    private void checkReplicator(final PeerId candidateId) {
+        if (this.state == State.STATE_LEADER) {
+            this.replicatorGroup.checkReplicator(candidateId, false);
+        }
     }
 }

@@ -3,6 +3,7 @@ package com.open.raft.core;
 import com.alipay.remoting.NamedThreadFactory;
 import com.lmax.disruptor.BlockingWaitStrategy;
 import com.lmax.disruptor.EventFactory;
+import com.lmax.disruptor.EventHandler;
 import com.lmax.disruptor.EventTranslator;
 import com.lmax.disruptor.RingBuffer;
 import com.lmax.disruptor.dsl.Disruptor;
@@ -49,11 +50,43 @@ public class FSMCallerImpl implements FSMCaller {
     private NodeMetrics                                             nodeMetrics;
     private final CopyOnWriteArrayList<LastAppliedLogIndexListener> lastAppliedLogIndexListeners = new CopyOnWriteArrayList<>();
 
+    public FSMCallerImpl() {
+        this.currTask = TaskType.IDLE;
+        this.lastAppliedIndex = new AtomicLong(0);
+        this.applyingIndex = new AtomicLong(0);
+    }
+
+
+    /**
+     * Task type
+     * 2018-Apr-03 11:12:25 AM
+     */
+    private enum TaskType {
+        IDLE, //
+        COMMITTED, //
+        SNAPSHOT_SAVE, //
+        SNAPSHOT_LOAD, //
+        LEADER_STOP, //
+        LEADER_START, //
+        START_FOLLOWING, //
+        STOP_FOLLOWING, //
+        SHUTDOWN, //
+        FLUSH, //
+        ERROR;
+
+        private String metricName;
+
+        public String metricName() {
+            if (this.metricName == null) {
+                this.metricName = "fsm-" + name().toLowerCase().replaceAll("_", "-");
+            }
+            return this.metricName;
+        }
+    }
+
 
     /**
      * Apply task for disruptor.
-     *
-     * @author boyan (boyan@alibaba-inc.com)
      *
      * 2018-Apr-03 11:12:35 AM
      */
@@ -86,6 +119,16 @@ public class FSMCallerImpl implements FSMCaller {
         }
     }
 
+    private class ApplyTaskHandler implements EventHandler<ApplyTask> {
+        // max committed index in current batch, reset to -1 every batch
+        private long maxCommittedIndex = -1;
+
+        @Override
+        public void onEvent(final ApplyTask event, final long sequence, final boolean endOfBatch) throws Exception {
+            this.maxCommittedIndex = runApplyTask(event, this.maxCommittedIndex, endOfBatch);
+        }
+    }
+
     @Override
     public boolean onStopFollowing(LeaderChangeContext ctx) {
         return enqueueTask((task, sequence) -> {
@@ -108,7 +151,7 @@ public class FSMCallerImpl implements FSMCaller {
         this.disruptor = DisruptorBuilder.<ApplyTask> newInstance() //
                 .setEventFactory(new ApplyTaskFactory()) //
                 .setRingBufferSize(opts.getDisruptorBufferSize()) //
-                .setThreadFactory(new NamedThreadFactory("JRaft-FSMCaller-Disruptor-", true)) //
+                .setThreadFactory(new NamedThreadFactory("Raft-FSMCaller-Disruptor-", true)) //
                 .setProducerType(ProducerType.MULTI) //
                 .setWaitStrategy(new BlockingWaitStrategy()) //
                 .build();
@@ -116,7 +159,7 @@ public class FSMCallerImpl implements FSMCaller {
         this.disruptor.setDefaultExceptionHandler(new LogExceptionHandler<Object>(getClass().getSimpleName()));
         this.taskQueue = this.disruptor.start();
         if (this.nodeMetrics.getMetricRegistry() != null) {
-            this.nodeMetrics.getMetricRegistry().register("jraft-fsm-caller-disruptor",
+            this.nodeMetrics.getMetricRegistry().register("raft-fsm-caller-disruptor",
                     new DisruptorMetricSet(this.taskQueue));
         }
         this.error = new RaftException(EnumOutter.ErrorType.ERROR_TYPE_NONE);

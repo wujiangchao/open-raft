@@ -18,7 +18,6 @@ package com.open.raft.rpc;
 
 
 import com.google.protobuf.Message;
-import com.open.raft.rpc.request.RequestVoteRequest;
 
 /**
  * Raft RPC service in server.
@@ -33,7 +32,7 @@ public interface RaftServerService {
      * @param request   data of the pre vote
      * @return the response message
      */
-    Message handlePreVoteRequest(RequestVoteRequest request);
+    Message handlePreVoteRequest(RpcRequests.RequestVoteRequest request);
 
     /**
      * Handle request-vote request.
@@ -41,7 +40,7 @@ public interface RaftServerService {
      * @param request   data of the vote
      * @return the response message
      */
-    Message handleRequestVoteRequest(RequestVoteRequest request);
+    Message handleRequestVoteRequest(RpcRequests.RequestVoteRequest request);
 
     /**
      * Handle append-entries request, return response message or
@@ -51,7 +50,7 @@ public interface RaftServerService {
      * @param done      callback
      * @return the response message
      */
-    Message handleAppendEntriesRequest(AppendEntriesRequest request, RpcRequestClosure done);
+    Message handleAppendEntriesRequest(RpcRequests.AppendEntriesRequest request, RpcRequestClosure done);
 
     /**
      * Handle install-snapshot request, return response message or

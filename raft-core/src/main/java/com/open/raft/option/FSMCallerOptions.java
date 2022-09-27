@@ -5,8 +5,8 @@ import com.open.raft.StateMachine;
 import com.open.raft.closure.ClosureQueue;
 import com.open.raft.core.NodeImpl;
 import com.open.raft.entity.LogId;
+import com.open.raft.storage.LogManager;
 
-import java.util.logging.LogManager;
 
 /**
  * @Description TODO
