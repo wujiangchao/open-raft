@@ -25,6 +25,12 @@ public enum RaftError {
      */
     EPERM(1008),
 
+    ENODESHUTDOWN(10006),
+
+    /**
+     * Server is in busy state
+     */
+    EBUSY(1009),
 
     /**
      * All Kinds of Timeout(Including Election_timeout, Timeout_now, Stepdown_timeout)

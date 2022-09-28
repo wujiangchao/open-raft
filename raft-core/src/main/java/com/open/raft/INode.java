@@ -2,6 +2,7 @@ package com.open.raft;
 
 import com.open.raft.entity.NodeId;
 import com.open.raft.entity.PeerId;
+import com.open.raft.entity.Task;
 import com.open.raft.option.NodeOptions;
 
 /**
@@ -25,5 +26,22 @@ public interface INode extends Lifecycle<NodeOptions> {
      * Get the raft group id.
      */
     String getGroupId();
+
+    /**
+     * [Thread-safe and wait-free]
+     *
+     * Apply task to the replicated-state-machine
+     *
+     * About the ownership:
+     * |task.data|: for the performance consideration, we will take away the
+     *               content. If you want keep the content, copy it before call
+     *               this function
+     * |task.done|: If the data is successfully committed to the raft group. We
+     *              will pass the ownership to #{@link StateMachine#onApply(Iterator)}.
+     *              Otherwise we will specify the error and call it.
+     *
+     * @param task task to apply
+     */
+    void apply(final Task task);
 
 }

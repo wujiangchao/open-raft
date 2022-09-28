@@ -1,6 +1,8 @@
 package com.open.raft.util;
 
 import com.alipay.remoting.NamedThreadFactory;
+import com.open.raft.Closure;
+import com.open.raft.Status;
 import io.netty.util.internal.SystemPropertyUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -74,4 +76,27 @@ public class Utils {
     public static Future<?> runInThread(final Runnable runnable) {
         return CLOSURE_EXECUTOR.submit(runnable);
     }
+
+    /**
+     * Run closure with status in thread pool.
+     */
+    @SuppressWarnings("Convert2Lambda")
+    public static Future<?> runClosureInThread(final Closure done, final Status status) {
+        if (done == null) {
+            return null;
+        }
+
+        return runInThread(new Runnable() {
+
+            @Override
+            public void run() {
+                try {
+                    done.run(status);
+                } catch (final Throwable t) {
+                    LOG.error("Fail to run done closure", t);
+                }
+            }
+        });
+    }
+
 }

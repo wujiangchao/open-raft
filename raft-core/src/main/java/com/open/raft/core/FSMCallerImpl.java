@@ -38,16 +38,16 @@ public class FSMCallerImpl implements FSMCaller {
     private StateMachine fsm;
     private ClosureQueue closureQueue;
     private final AtomicLong lastAppliedIndex;
-    private long                                                    lastAppliedTerm;
+    private long lastAppliedTerm;
     private Closure afterShutdown;
-    private NodeImpl                                                node;
-    private volatile TaskType                                       currTask;
-    private final AtomicLong                                        applyingIndex;
-    private volatile RaftException                                  error;
+    private NodeImpl node;
+    private volatile TaskType currTask;
+    private final AtomicLong applyingIndex;
+    private volatile RaftException error;
     private Disruptor<ApplyTask> disruptor;
     private RingBuffer<ApplyTask> taskQueue;
     private volatile CountDownLatch shutdownLatch;
-    private NodeMetrics                                             nodeMetrics;
+    private NodeMetrics nodeMetrics;
     private final CopyOnWriteArrayList<LastAppliedLogIndexListener> lastAppliedLogIndexListeners = new CopyOnWriteArrayList<>();
 
     public FSMCallerImpl() {
@@ -87,18 +87,18 @@ public class FSMCallerImpl implements FSMCaller {
 
     /**
      * Apply task for disruptor.
-     *
+     * <p>
      * 2018-Apr-03 11:12:35 AM
      */
     private static class ApplyTask {
-        TaskType            type;
+        TaskType type;
         // union fields
-        long                committedIndex;
-        long                term;
+        long committedIndex;
+        long term;
         Status status;
         LeaderChangeContext leaderChangeCtx;
-        Closure             done;
-        CountDownLatch      shutdownLatch;
+        Closure done;
+        CountDownLatch shutdownLatch;
 
         public void reset() {
             this.type = null;
@@ -123,6 +123,12 @@ public class FSMCallerImpl implements FSMCaller {
         // max committed index in current batch, reset to -1 every batch
         private long maxCommittedIndex = -1;
 
+        /**
+         * @param event      事件处理器正处理的事件
+         * @param sequence   当前处理的Event所对应的序号
+         * @param endOfBatch 表示RingBuffer中，在该事件之后，是否还有事件，即true就表示无事件了，消费者可以退出了，false表示后面还有事件，需要继续消费
+         * @throws Exception
+         */
         @Override
         public void onEvent(final ApplyTask event, final long sequence, final boolean endOfBatch) throws Exception {
             this.maxCommittedIndex = runApplyTask(event, this.maxCommittedIndex, endOfBatch);
@@ -148,7 +154,7 @@ public class FSMCallerImpl implements FSMCaller {
         this.lastAppliedIndex.set(opts.getBootstrapId().getIndex());
         notifyLastAppliedIndexUpdated(this.lastAppliedIndex.get());
         this.lastAppliedTerm = opts.getBootstrapId().getTerm();
-        this.disruptor = DisruptorBuilder.<ApplyTask> newInstance() //
+        this.disruptor = DisruptorBuilder.<ApplyTask>newInstance() //
                 .setEventFactory(new ApplyTaskFactory()) //
                 .setRingBufferSize(opts.getDisruptorBufferSize()) //
                 .setThreadFactory(new NamedThreadFactory("Raft-FSMCaller-Disruptor-", true)) //

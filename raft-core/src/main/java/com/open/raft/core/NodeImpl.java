@@ -1,6 +1,9 @@
 package com.open.raft.core;
 
 import com.google.protobuf.Message;
+import com.lmax.disruptor.EventTranslator;
+import com.lmax.disruptor.RingBuffer;
+import com.lmax.disruptor.dsl.Disruptor;
 import com.open.raft.FSMCaller;
 import com.open.raft.INode;
 import com.open.raft.RaftServiceFactory;
@@ -9,10 +12,13 @@ import com.open.raft.closure.ClosureQueue;
 import com.open.raft.closure.ClosureQueueImpl;
 import com.open.raft.core.done.OnPreVoteRpcDone;
 import com.open.raft.core.done.OnRequestVoteRpcDone;
+import com.open.raft.core.event.LogEntryEvent;
 import com.open.raft.entity.LeaderChangeContext;
+import com.open.raft.entity.LogEntry;
 import com.open.raft.entity.LogId;
 import com.open.raft.entity.NodeId;
 import com.open.raft.entity.PeerId;
+import com.open.raft.entity.Task;
 import com.open.raft.error.RaftError;
 import com.open.raft.option.FSMCallerOptions;
 import com.open.raft.option.LogManagerOptions;
@@ -30,6 +36,7 @@ import com.open.raft.util.concurrent.NodeReadWriteLock;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReadWriteLock;
 
@@ -82,6 +89,7 @@ public class NodeImpl implements INode, RaftServerService {
             .writeLock();
     protected final Lock readLock = this.readWriteLock
             .readLock();
+    private volatile CountDownLatch shutdownLatch;
 
 
     private FSMCaller fsmCaller;
@@ -89,6 +97,12 @@ public class NodeImpl implements INode, RaftServerService {
     private LogStorage logStorage;
 
     private ClosureQueue closureQueue;
+
+    /**
+     * Disruptor to run node service
+     */
+    private Disruptor<LogEntryEvent> applyDisruptor;
+    private RingBuffer<LogEntryEvent> applyQueue;
 
     public NodeImpl(String groupId, PeerId serverId) {
         this.groupId = groupId;
@@ -324,6 +338,45 @@ public class NodeImpl implements INode, RaftServerService {
         return null;
     }
 
+    @Override
+    public void apply(Task task) {
+        if (this.shutdownLatch != null) {
+            Utils.runClosureInThread(task.getDone(), new Status(RaftError.ENODESHUTDOWN, "Node is shutting down."));
+            throw new IllegalStateException("Node is shutting down");
+        }
+        Requires.requireNonNull(task, "Null task");
+        final LogEntry entry = new LogEntry();
+        entry.setData(task.getData());
+
+        //使用EventTranslator用于构建Event，主要是为了java8的lambda写法而产生的
+        final EventTranslator<LogEntryEvent> translator = (event, sequence) -> {
+            event.reset();
+            event.done = task.getDone();
+            event.entry = entry;
+            event.expectedTerm = task.getExpectedTerm();
+        };
+
+        switch (this.options.getApplyTaskMode()) {
+            case Blocking:
+                //队列满了会阻塞
+                this.applyQueue.publishEvent(translator);
+                break;
+            case NonBlocking:
+            default:
+                if (!this.applyQueue.tryPublishEvent(translator)) {
+                    String errorMsg = "Node is busy, has too many tasks, queue is full and bufferSize=" + this.applyQueue.getBufferSize();
+                    Utils.runClosureInThread(task.getDone(),
+                            new Status(RaftError.EBUSY, errorMsg));
+                    LOG.warn("Node {} applyQueue is overload.", getNodeId());
+                    this.metrics.recordTimes("apply-task-overload-times", 1);
+                    if (task.getDone() == null) {
+                        throw new OverloadException(errorMsg);
+                    }
+                }
+                break;
+        }
+    }
+
     /**
      * SOFAJRaft 在 Follower 本地维护了一个时间戳来记录收到 Leader
      * 上一次数据更新的时间 lastLeaderTimestamp,只有超过 election timeout 之后才允许接受预投票请求
@@ -501,6 +554,21 @@ public class NodeImpl implements INode, RaftServerService {
     }
 
     @Override
+    public Message handleInstallSnapshot(InstallSnapshotRequest request, RpcRequestClosure done) {
+        return null;
+    }
+
+    @Override
+    public Message handleTimeoutNowRequest(TimeoutNowRequest request, RpcRequestClosure done) {
+        return null;
+    }
+
+    @Override
+    public void handleReadIndexRequest(ReadIndexRequest request, RpcResponseClosure<ReadIndexResponse> done) {
+
+    }
+
+    @Override
     public Message handleInstallSnapshot(RpcRequests.InstallSnapshotRequest request, RpcRequestClosure done) {
         return null;
     }
@@ -653,6 +721,50 @@ public class NodeImpl implements INode, RaftServerService {
             this.writeLock.unlock();
         }
 
+    }
+
+    private void becomeLeader() {
+        Requires.requireTrue(this.state == State.STATE_CANDIDATE, "Illegal state: " + this.state);
+        LOG.info("Node {} become leader of group, term={}, conf={}, oldConf={}.", getNodeId(), this.currTerm,
+                this.conf.getConf(), this.conf.getOldConf());
+        // cancel candidate vote timer
+        //晋升leader之后就会把选举的定时器关闭了
+        stopVoteTimer();
+        this.state = State.STATE_LEADER;
+        this.leaderId = this.serverId.copy();
+        //复制集群中设置新的任期
+        this.replicatorGroup.resetTerm(this.currTerm);
+        // Start follower's replicators
+        //遍历所有的集群节点
+        for (final PeerId peer : this.conf.listPeers()) {
+            if (peer.equals(this.serverId)) {
+                continue;
+            }
+            LOG.debug("Node {} add a replicator, term={}, peer={}.", getNodeId(), this.currTerm, peer);
+            //如果成为leader，那么需要把自己的日志信息复制到其他节点
+            if (!this.replicatorGroup.addReplicator(peer)) {
+                LOG.error("Fail to add a replicator, peer={}.", peer);
+            }
+        }
+
+        // Start learner's replicators
+        for (final PeerId peer : this.conf.listLearners()) {
+            LOG.debug("Node {} add a learner replicator, term={}, peer={}.", getNodeId(), this.currTerm, peer);
+            if (!this.replicatorGroup.addReplicator(peer, ReplicatorType.Learner)) {
+                LOG.error("Fail to add a learner replicator, peer={}.", peer);
+            }
+        }
+
+        // init commit manager
+        this.ballotBox.resetPendingIndex(this.logManager.getLastLogIndex() + 1);
+        // Register _conf_ctx to reject configuration changing before the first log
+        // is committed.
+        if (this.confCtx.isBusy()) {
+            throw new IllegalStateException();
+        }
+        this.confCtx.flush(this.conf.getConf(), this.conf.getOldConf());
+        //如果是leader了，那么就要定时的检查不是有资格胜任
+        this.stepDownTimer.start();
     }
 
     private void checkReplicator(final PeerId candidateId) {
