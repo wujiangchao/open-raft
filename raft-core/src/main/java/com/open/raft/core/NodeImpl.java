@@ -19,6 +19,7 @@ import com.open.raft.entity.LogId;
 import com.open.raft.entity.NodeId;
 import com.open.raft.entity.PeerId;
 import com.open.raft.entity.Task;
+import com.open.raft.error.OverloadException;
 import com.open.raft.error.RaftError;
 import com.open.raft.option.FSMCallerOptions;
 import com.open.raft.option.LogManagerOptions;
@@ -37,6 +38,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReadWriteLock;
 
@@ -66,6 +68,12 @@ public class NodeImpl implements INode, RaftServerService {
      */
     private final String groupId;
     private NodeOptions options;
+
+    public RaftOptions getRaftOptions() {
+        return raftOptions;
+    }
+
+
     private RaftOptions raftOptions;
     private final PeerId serverId;
 
@@ -104,6 +112,9 @@ public class NodeImpl implements INode, RaftServerService {
     private Disruptor<LogEntryEvent> applyDisruptor;
     private RingBuffer<LogEntryEvent> applyQueue;
 
+    public static final AtomicInteger GLOBAL_NUM_NODES = new AtomicInteger(
+            0);
+
     public NodeImpl(String groupId, PeerId serverId) {
         this.groupId = groupId;
         this.serverId = serverId != null ? serverId.copy() : null;
@@ -114,8 +125,8 @@ public class NodeImpl implements INode, RaftServerService {
         //设置最新的时间戳
         updateLastLeaderTimestamp(Utils.monotonicMs());
 //        this.confCtx = new ConfigurationCtx(this);
-//        final int num = GLOBAL_NUM_NODES.incrementAndGet();
-//        LOG.info("The number of active nodes increment to {}.", num);
+        final int num = GLOBAL_NUM_NODES.incrementAndGet();
+        LOG.info("The number of active nodes increment to {}.", num);
     }
 
     @Override
@@ -280,12 +291,13 @@ public class NodeImpl implements INode, RaftServerService {
                 final OnPreVoteRpcDone done = new OnPreVoteRpcDone(peer, this, term);
 
                 //向被遍历到的这个节点发送一个预投票的请求
-                done.request = RequestVoteRequest.newBuilder() //
-                        .setPreVote(true) // it's a pre-vote request.
+                done.request = RpcRequests.RequestVoteRequest.newBuilder() //
+                        .setPreVote(true)
                         .setGroupId(this.groupId) //
                         .setServerId(this.serverId.toString()) //
                         .setPeerId(peer.toString()) //
-                        .setTerm(this.currTerm + 1) // next term
+                        // next term
+                        .setTerm(this.currTerm + 1)
                         .setLastLogIndex(lastLogId.getIndex()) //
                         .setLastLogTerm(lastLogId.getTerm()) //
                         .build();
@@ -340,6 +352,7 @@ public class NodeImpl implements INode, RaftServerService {
 
     @Override
     public void apply(Task task) {
+        //shutdown 方法中会用到 shutdownLatch，可利用此变量是否为null来判断当前是否在shutting down
         if (this.shutdownLatch != null) {
             Utils.runClosureInThread(task.getDone(), new Status(RaftError.ENODESHUTDOWN, "Node is shutting down."));
             throw new IllegalStateException("Node is shutting down");

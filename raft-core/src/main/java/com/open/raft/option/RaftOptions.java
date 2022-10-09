@@ -8,8 +8,23 @@ import com.open.raft.util.Copiable;
  * @Author jack wu
  */
 public class RaftOptions implements Copiable<RaftOptions> {
+
+    /**
+     * Maximum number of tasks that can be applied in a batch
+     *  (Disruptor handler batch size)
+     */
+    private int applyBatch = 32;
+
     @Override
     public RaftOptions copy() {
         return null;
+    }
+
+    public int getApplyBatch() {
+        return applyBatch;
+    }
+
+    public void setApplyBatch(int applyBatch) {
+        this.applyBatch = applyBatch;
     }
 }
