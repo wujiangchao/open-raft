@@ -31,7 +31,7 @@ public class LogEntryEventHandler implements EventHandler<LogEntryEvent> {
             throws Exception {
         if (event.shutdownLatch != null) {
             if (!this.tasks.isEmpty()) {
-                executeApplyingTasks(this.tasks);
+                node.executeApplyingTasks(this.tasks);
                 reset();
             }
             final int num = NodeImpl.GLOBAL_NUM_NODES.decrementAndGet();
@@ -42,7 +42,7 @@ public class LogEntryEventHandler implements EventHandler<LogEntryEvent> {
 
         this.tasks.add(event);
         if (this.tasks.size() >= node.getRaftOptions().getApplyBatch() || endOfBatch) {
-            executeApplyingTasks(this.tasks);
+            node.executeApplyingTasks(this.tasks);
             reset();
         }
     }

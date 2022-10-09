@@ -4,6 +4,7 @@ import com.google.protobuf.Message;
 import com.lmax.disruptor.EventTranslator;
 import com.lmax.disruptor.RingBuffer;
 import com.lmax.disruptor.dsl.Disruptor;
+import com.open.raft.Closure;
 import com.open.raft.FSMCaller;
 import com.open.raft.INode;
 import com.open.raft.RaftServiceFactory;
@@ -13,6 +14,7 @@ import com.open.raft.closure.ClosureQueueImpl;
 import com.open.raft.core.done.OnPreVoteRpcDone;
 import com.open.raft.core.done.OnRequestVoteRpcDone;
 import com.open.raft.core.event.LogEntryEvent;
+import com.open.raft.entity.EnumOutter;
 import com.open.raft.entity.LeaderChangeContext;
 import com.open.raft.entity.LogEntry;
 import com.open.raft.entity.LogId;
@@ -37,10 +39,14 @@ import com.open.raft.util.concurrent.NodeReadWriteLock;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReadWriteLock;
+import java.util.stream.Collectors;
 
 /**
  * @Description 表示一个 raft 节点，可以提交 task，以及查询 raft group 信息，
@@ -103,8 +109,9 @@ public class NodeImpl implements INode, RaftServerService {
     private FSMCaller fsmCaller;
     private LogManager logManager;
     private LogStorage logStorage;
-
     private ClosureQueue closureQueue;
+    private BallotBox ballotBox;
+
 
     /**
      * Disruptor to run node service
@@ -783,6 +790,63 @@ public class NodeImpl implements INode, RaftServerService {
     private void checkReplicator(final PeerId candidateId) {
         if (this.state == State.STATE_LEADER) {
             this.replicatorGroup.checkReplicator(candidateId, false);
+        }
+    }
+
+    public void executeApplyingTasks(final List<LogEntryEvent> tasks) {
+        this.writeLock.lock();
+        try {
+            final int size = tasks.size();
+            //如果当前节点的状态已经不是leader,直接执行task.done.run()
+            if (this.state != State.STATE_LEADER) {
+                final Status st = new Status();
+                if (this.state != State.STATE_TRANSFERRING) {
+                    st.setError(RaftError.EPERM, "Is not leader.");
+                } else {
+                    st.setError(RaftError.EBUSY, "Is transferring leadership.");
+                }
+                LOG.debug("Node {} can't apply, status={}.", getNodeId(), st);
+                final List<Closure> dones = tasks.stream().map(ele -> ele.done)
+                        .filter(Objects::nonNull).collect(Collectors.toList());
+                Utils.runInThread(() -> {
+                    for (final Closure done : dones) {
+                        done.run(st);
+                    }
+                });
+                return;
+            }
+            final List<LogEntry> entries = new ArrayList<>(size);
+            for (int i = 0; i < size; i++) {
+                final LogEntryEvent task = tasks.get(i);
+                //FIXME 此分支何时触发 暂且未知
+                if (task.expectedTerm != -1 && task.expectedTerm != this.currTerm) {
+                    LOG.debug("Node {} can't apply task whose expectedTerm={} doesn't match currTerm={}.", getNodeId(),
+                            task.expectedTerm, this.currTerm);
+                    if (task.done != null) {
+                        final Status st = new Status(RaftError.EPERM, "expected_term=%d doesn't match current_term=%d",
+                                task.expectedTerm, this.currTerm);
+                        Utils.runClosureInThread(task.done, st);
+                        task.reset();
+                    }
+                    continue;
+                }
+                if (!this.ballotBox.appendPendingTask(this.conf.getConf(),
+                        this.conf.isStable() ? null : this.conf.getOldConf(), task.done)) {
+                    Utils.runClosureInThread(task.done, new Status(RaftError.EINTERNAL, "Fail to append task."));
+                    task.reset();
+                    continue;
+                }
+                // set task entry info before adding to list.
+                task.entry.getId().setTerm(this.currTerm);
+                task.entry.setType(EnumOutter.EntryType.ENTRY_TYPE_DATA);
+                entries.add(task.entry);
+                task.reset();
+            }
+            this.logManager.appendEntries(entries, new LeaderStableClosure(entries));
+            // update conf.first
+            checkAndSetConfiguration(true);
+        } finally {
+            this.writeLock.unlock();
         }
     }
 }

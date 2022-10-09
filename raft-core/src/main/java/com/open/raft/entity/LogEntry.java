@@ -19,4 +19,21 @@ public class LogEntry implements Checksum{
     public long checksum() {
         return 0;
     }
+
+
+    public EnumOutter.EntryType getType() {
+        return type;
+    }
+
+    public void setType(EnumOutter.EntryType type) {
+        this.type = type;
+    }
+
+    public LogId getId() {
+        return id;
+    }
+
+    public void setId(LogId id) {
+        this.id = id;
+    }
 }

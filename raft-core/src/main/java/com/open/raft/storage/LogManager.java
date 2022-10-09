@@ -1,6 +1,7 @@
 package com.open.raft.storage;
 
 import com.open.raft.Lifecycle;
+import com.open.raft.entity.LogEntry;
 import com.open.raft.entity.LogId;
 import com.open.raft.option.LogManagerOptions;
 
