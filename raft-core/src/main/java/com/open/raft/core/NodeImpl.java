@@ -33,6 +33,7 @@ import com.open.raft.rpc.RpcRequests;
 import com.open.raft.rpc.RpcResponseClosure;
 import com.open.raft.storage.LogManager;
 import com.open.raft.storage.LogStorage;
+import com.open.raft.storage.impl.LogManagerImpl;
 import com.open.raft.util.Requires;
 import com.open.raft.util.Utils;
 import com.open.raft.util.concurrent.NodeReadWriteLock;
@@ -810,6 +811,7 @@ public class NodeImpl implements INode, RaftServerService {
                         .filter(Objects::nonNull).collect(Collectors.toList());
                 Utils.runInThread(() -> {
                     for (final Closure done : dones) {
+                        // Closure.run(错误状态）返回
                         done.run(st);
                     }
                 });
@@ -842,6 +844,7 @@ public class NodeImpl implements INode, RaftServerService {
                 entries.add(task.entry);
                 task.reset();
             }
+
             this.logManager.appendEntries(entries, new LeaderStableClosure(entries));
             // update conf.first
             checkAndSetConfiguration(true);
