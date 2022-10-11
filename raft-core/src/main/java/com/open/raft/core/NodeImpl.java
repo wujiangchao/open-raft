@@ -27,6 +27,7 @@ import com.open.raft.option.FSMCallerOptions;
 import com.open.raft.option.LogManagerOptions;
 import com.open.raft.option.NodeOptions;
 import com.open.raft.option.RaftOptions;
+import com.open.raft.option.ReplicatorGroupOptions;
 import com.open.raft.rpc.RaftServerService;
 import com.open.raft.rpc.RpcRequestClosure;
 import com.open.raft.rpc.RpcRequests;
@@ -112,7 +113,7 @@ public class NodeImpl implements INode, RaftServerService {
     private LogStorage logStorage;
     private ClosureQueue closureQueue;
     private BallotBox ballotBox;
-
+    private ReplicatorGroup replicatorGroup;
 
     /**
      * Disruptor to run node service
@@ -169,6 +170,23 @@ public class NodeImpl implements INode, RaftServerService {
             LOG.error("Node {} initFSMCaller failed.", getNodeId());
             return false;
         }
+
+
+
+        // TODO RPC service and ReplicatorGroup is in cycle dependent, refactor it
+        this.replicatorGroup = new ReplicatorGroupImpl();
+        //收其他节点或者客户端发过来的请求，转交给对应服务处理
+        this.rpcService = new DefaultRaftClientService(this.replicatorGroup);
+        final ReplicatorGroupOptions rgOpts = new ReplicatorGroupOptions();
+        rgOpts.setHeartbeatTimeoutMs(heartbeatTimeout(this.options.getElectionTimeoutMs()));
+        rgOpts.setElectionTimeoutMs(this.options.getElectionTimeoutMs());
+        rgOpts.setLogManager(this.logManager);
+        rgOpts.setBallotBox(this.ballotBox);
+        rgOpts.setNode(this);
+        rgOpts.setRaftRpcClientService(this.rpcService);
+        rgOpts.setSnapshotStorage(this.snapshotExecutor != null ? this.snapshotExecutor.getSnapshotStorage() : null);
+        rgOpts.setRaftOptions(this.raftOptions);
+        rgOpts.setTimerManager(this.timerManager);
         return false;
     }
 
@@ -575,17 +593,17 @@ public class NodeImpl implements INode, RaftServerService {
     }
 
     @Override
-    public Message handleInstallSnapshot(InstallSnapshotRequest request, RpcRequestClosure done) {
+    public Message handleInstallSnapshot(RpcRequests.InstallSnapshotRequest request, RpcRequestClosure done) {
         return null;
     }
 
     @Override
-    public Message handleTimeoutNowRequest(TimeoutNowRequest request, RpcRequestClosure done) {
+    public Message handleTimeoutNowRequest(RpcRequests.TimeoutNowRequest request, RpcRequestClosure done) {
         return null;
     }
 
     @Override
-    public void handleReadIndexRequest(ReadIndexRequest request, RpcResponseClosure<ReadIndexResponse> done) {
+    public void handleReadIndexRequest(RpcRequests.ReadIndexRequest request, RpcResponseClosure<RpcRequests.ReadIndexResponse> done) {
 
     }
 
@@ -756,7 +774,7 @@ public class NodeImpl implements INode, RaftServerService {
         //复制集群中设置新的任期
         this.replicatorGroup.resetTerm(this.currTerm);
         // Start follower's replicators
-        //遍历所有的集群节点
+        //当节点成为leader后，会启动所有follower和learner的replicator。其实是通过addReplicator方法实现的。
         for (final PeerId peer : this.conf.listPeers()) {
             if (peer.equals(this.serverId)) {
                 continue;
@@ -844,7 +862,7 @@ public class NodeImpl implements INode, RaftServerService {
                 entries.add(task.entry);
                 task.reset();
             }
-
+            //落盘后调用LeaderStableClosure，给自己投一票
             this.logManager.appendEntries(entries, new LeaderStableClosure(entries));
             // update conf.first
             checkAndSetConfiguration(true);

@@ -1,5 +1,8 @@
 package com.open.raft.storage.impl;
 
+import com.lmax.disruptor.EventFactory;
+import com.lmax.disruptor.RingBuffer;
+import com.lmax.disruptor.dsl.Disruptor;
 import com.open.raft.Status;
 import com.open.raft.conf.Configuration;
 import com.open.raft.entity.EnumOutter;
@@ -42,9 +45,37 @@ public class LogManagerImpl implements LogManager {
     private volatile long firstLogIndex;
     private volatile long lastLogIndex;
 
-    private Disruptor<StableClosureEvent>                    disruptor;
-    private RingBuffer<StableClosureEvent>                   diskQueue;
+    private Disruptor<StableClosureEvent> disruptor;
+    private RingBuffer<StableClosureEvent> diskQueue;
     private RaftOptions raftOptions;
+
+
+    private enum EventType {
+        OTHER, // other event type.
+        RESET, // reset
+        TRUNCATE_PREFIX, // truncate log from prefix
+        TRUNCATE_SUFFIX, // truncate log from suffix
+        SHUTDOWN, //
+        LAST_LOG_ID // get last log id
+    }
+
+    private static class StableClosureEvent {
+        StableClosure done;
+        EventType     type;
+
+        void reset() {
+            this.done = null;
+            this.type = null;
+        }
+    }
+
+    private static class StableClosureEventFactory implements EventFactory<StableClosureEvent> {
+
+        @Override
+        public StableClosureEvent newInstance() {
+            return new StableClosureEvent();
+        }
+    }
 
     @Override
     public boolean init(LogManagerOptions opts) {

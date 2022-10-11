@@ -33,9 +33,17 @@ public enum RaftError {
     EBUSY(1009),
 
     /**
+     * Timed out
+     */
+    ETIMEDOUT(1010),
+
+
+    /**
      * All Kinds of Timeout(Including Election_timeout, Timeout_now, Stepdown_timeout)
      */
     ERAFTTIMEDOUT(10001);
+
+
 
 
     private static final Map<Integer, RaftError> RAFT_ERROR_MAP = new HashMap<>();
