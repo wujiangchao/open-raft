@@ -172,7 +172,6 @@ public class NodeImpl implements INode, RaftServerService {
         }
 
 
-
         // TODO RPC service and ReplicatorGroup is in cycle dependent, refactor it
         this.replicatorGroup = new ReplicatorGroupImpl();
         //收其他节点或者客户端发过来的请求，转交给对应服务处理
@@ -587,8 +586,126 @@ public class NodeImpl implements INode, RaftServerService {
         return null;
     }
 
+    /**
+     * 校验当前的Node节点是否还处于活跃状态，如果不是的话，那么直接返回一个error的response
+     * 校验请求的serverId的格式是否正确，不正确则返回一个error的response
+     * 校验请求的任期是否小于当前的任期，如果是那么返回一个AppendEntriesResponse类型的response
+     * 调用checkStepDown方法检测当前节点的任期，以及状态，是否有leader等
+     * 如果请求的serverId和当前节点的leaderId是不是同一个，用来校验是不是leader发起的请求，如果不是返回一个AppendEntriesResponse
+     * 校验是否正在生成快照
+     * 获取请求的Index在当前节点中对应的LogEntry的任期是不是和请求传入的任期相同，不同的话则返回AppendEntriesResponse
+     * 如果传入的entriesCount为零，那么leader发送的可能是心跳或者发送的是sendEmptyEntry，返回AppendEntriesResponse，并将当前任期和最新index封装返回
+     * 请求的数据不为空，那么遍历所有的数据
+     * 实例化一个logEntry，并且将数据和属性设置到logEntry实例中，最后将logEntry放入到entries集合中
+     * 调用logManager将数据批量提交日志写入 RocksDB
+     *
+     * @param request data of the entries to append
+     * @param done    callback
+     * @return
+     */
     @Override
     public Message handleAppendEntriesRequest(RpcRequests.AppendEntriesRequest request, RpcRequestClosure done) {
+        boolean doUnlock = true;
+        final long startMs = Utils.monotonicMs();
+        this.writeLock.lock();
+        //获取entryLog个数
+        final int entriesCount = request.getEntriesCount();
+        boolean success = false;
+        try {
+            //校验当前节点是否活跃
+            if (!this.state.isActive()) {
+                LOG.warn("Node {} is not in active state, currTerm={}.", getNodeId(), this.currTerm);
+                return RpcFactoryHelper //
+                        .responseFactory() //
+                        .newResponse(RpcRequests.AppendEntriesResponse.getDefaultInstance(), RaftError.EINVAL,
+                                "Node %s is not in active state, state %s.", getNodeId(), this.state.name());
+            }
+
+            final PeerId serverId = new PeerId();
+            if (!serverId.parse(request.getServerId())) {
+                LOG.warn("Node {} received AppendEntriesRequest from {} serverId bad format.", getNodeId(),
+                        request.getServerId());
+                return RpcFactoryHelper //
+                        .responseFactory() //
+                        .newResponse(RpcRequests.AppendEntriesResponse.getDefaultInstance(), RaftError.EINVAL,
+                                "Parse serverId failed: %s.", request.getServerId());
+            }
+
+            // Check stale term
+            //校验任期
+            if (request.getTerm() < this.currTerm) {
+                LOG.warn("Node {} ignore stale AppendEntriesRequest from {}, term={}, currTerm={}.", getNodeId(),
+                        request.getServerId(), request.getTerm(), this.currTerm);
+                return RpcRequests.AppendEntriesResponse.newBuilder() //
+                        .setSuccess(false) //
+                        .setTerm(this.currTerm) //
+                        .build();
+            }
+
+            // Check term and state to step down
+            //当前节点如果不是Follower节点的话要执行StepDown操作
+            checkStepDown(request.getTerm(), serverId);
+            //这说明请求的节点不是当前节点的leader
+            if (!serverId.equals(this.leaderId)) {
+                LOG.error("Another peer {} declares that it is the leader at term {} which was occupied by leader {}.",
+                        serverId, this.currTerm, this.leaderId);
+                // Increase the term by 1 and make both leaders step down to minimize the
+                // loss of split brain
+                stepDown(request.getTerm() + 1, false, new Status(RaftError.ELEADERCONFLICT,
+                        "More than one leader in the same term."));
+                return RpcRequests.AppendEntriesResponse.newBuilder() //
+                        .setSuccess(false) //
+                        .setTerm(request.getTerm() + 1) //
+                        .build();
+            }
+
+            updateLastLeaderTimestamp(Utils.monotonicMs());
+            //校验是否正在生成快照
+            if (entriesCount > 0 && this.snapshotExecutor != null && this.snapshotExecutor.isInstallingSnapshot()) {
+                LOG.warn("Node {} received AppendEntriesRequest while installing snapshot.", getNodeId());
+                return RpcFactoryHelper //
+                        .responseFactory() //
+                        .newResponse(RpcRequests.AppendEntriesResponse.getDefaultInstance(), RaftError.EBUSY,
+                                "Node %s:%s is installing snapshot.", this.groupId, this.serverId);
+            }
+
+            //传入的是发起请求节点的nextIndex-1
+            final long prevLogIndex = request.getPrevLogIndex();
+            final long prevLogTerm = request.getPrevLogTerm();
+            final long localPrevLogTerm = this.logManager.getTerm(prevLogIndex);
+            //发起请求的节点prevLogIndex对应的任期和当前节点的index所对应的任期不匹配
+            if (localPrevLogTerm != prevLogTerm) {
+                final long lastLogIndex = this.logManager.getLastLogIndex();
+
+                LOG.warn(
+                        "Node {} reject term_unmatched AppendEntriesRequest from {}, term={}, prevLogIndex={}, prevLogTerm={}, localPrevLogTerm={}, lastLogIndex={}, entriesSize={}.",
+                        getNodeId(), request.getServerId(), request.getTerm(), prevLogIndex, prevLogTerm, localPrevLogTerm,
+                        lastLogIndex, entriesCount);
+
+                return RpcRequests.AppendEntriesResponse.newBuilder() //
+                        .setSuccess(false) //
+                        .setTerm(this.currTerm) //
+                        .setLastLogIndex(lastLogIndex) //
+                        .build();
+            }
+            //响应心跳或者发送的是sendEmptyEntry
+            if (entriesCount == 0) {
+                // heartbeat or probe request
+                final RpcRequests.AppendEntriesResponse.Builder respBuilder = RpcRequests.AppendEntriesResponse.newBuilder() //
+                        .setSuccess(true) //
+                        .setTerm(this.currTerm) //
+                        //  返回当前节点的最新的index
+                        .setLastLogIndex(this.logManager.getLastLogIndex());
+                doUnlock = false;
+                this.writeLock.unlock();
+                // see the comments at FollowerStableClosure#run()
+                this.ballotBox.setLastCommittedIndex(Math.min(request.getCommittedIndex(), prevLogIndex));
+                return respBuilder.build();
+            }
+
+        } finally {
+
+        }
         return null;
     }
 

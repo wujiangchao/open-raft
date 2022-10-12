@@ -29,6 +29,35 @@ import java.util.concurrent.TimeUnit;
 public class Replicator  implements ThreadId.OnError {
 
     private static final Logger LOG = LoggerFactory.getLogger(Replicator.class);
+    private final RaftClientService rpcService;
+
+
+    private final ReplicatorOptions options;
+    private final RaftOptions raftOptions;
+
+    private volatile State state;
+
+
+
+    /**
+     * Replicator internal state
+     *
+     * @author dennis
+     */
+    public enum State {
+        Created,
+        Probe, // probe follower state
+        Snapshot, // installing snapshot to follower
+        Replicate, // replicate logs normally
+        Destroyed // destroyed
+    }
+
+
+    public Replicator(ReplicatorOptions options, RaftOptions raftOptions) {
+        this.options = options;
+        this.raftOptions = raftOptions;
+        setState(State.Created);
+    }
 
     public static ThreadId start(final ReplicatorOptions opts, final RaftOptions raftOptions) {
         if (opts.getLogManager() == null || opts.getBallotBox() == null || opts.getNode() == null) {
@@ -75,7 +104,7 @@ public class Replicator  implements ThreadId.OnError {
     private void startHeartbeatTimer(final long startMs) {
         final long dueTime = startMs + this.options.getDynamicHeartBeatTimeoutMs();
         try {
-            //心跳被作为一种超时异常处理。
+            //心跳被作为一种超时异常处理。heartbeat为了不重复发送选择定时而非周期Timer，直到收到响应后再次计时发送。
             this.heartbeatTimer = this.timerManager.schedule(() -> onTimeout(this.id), dueTime - Utils.nowMs(),
                     TimeUnit.MILLISECONDS);
         } catch (final Exception e) {
@@ -203,7 +232,7 @@ public class Replicator  implements ThreadId.OnError {
                 this.heartbeatInFly = this.rpcService.appendEntries(this.options.getPeerId().getEndpoint(), request,
                         this.options.getElectionTimeoutMs() / 2, heartbeatDone);
             } else {
-                // probe
+                // probe  发送一个 Probe 类型的探针请求，目的是知道 Follower 已经拥有的的日志位置，以便于向 Follower 发送后续的日志。
                 // No entries and has empty data means a probe request.
                 // TODO(boyan) refactor, adds a new flag field?
                 rb.setData(ByteString.EMPTY);
@@ -242,5 +271,126 @@ public class Replicator  implements ThreadId.OnError {
         }
     }
 
+    static void onHeartbeatReturned(final ThreadId id, final Status status, final AppendEntriesRequest request,
+                                    final AppendEntriesResponse response, final long rpcSendTime) {
+        if (id == null) {
+            // replicator already was destroyed.
+            return;
+        }
+        final long startTimeMs = Utils.nowMs();
+        Replicator r;
+        if ((r = (Replicator) id.lock()) == null) {
+            return;
+        }
+        boolean doUnlock = true;
+        try {
+            final boolean isLogDebugEnabled = LOG.isDebugEnabled();
+            StringBuilder sb = null;
+            if (isLogDebugEnabled) {
+                sb = new StringBuilder("Node ") //
+                        .append(r.options.getGroupId()) //
+                        .append(':') //
+                        .append(r.options.getServerId()) //
+                        .append(" received HeartbeatResponse from ") //
+                        .append(r.options.getPeerId()) //
+                        .append(" prevLogIndex=") //
+                        .append(request.getPrevLogIndex()) //
+                        .append(" prevLogTerm=") //
+                        .append(request.getPrevLogTerm());
+            }
+            //网络通讯异常
+            if (!status.isOk()) {
+                if (isLogDebugEnabled) {
+                    sb.append(" fail, sleep, status=") //
+                            .append(status);
+                    LOG.debug(sb.toString());
+                }
+                r.setState(State.Probe);
+                notifyReplicatorStatusListener(r, ReplicatorEvent.ERROR, status);
+                if (++r.consecutiveErrorTimes % 10 == 0) {
+                    LOG.warn("Fail to issue RPC to {}, consecutiveErrorTimes={}, error={}", r.options.getPeerId(),
+                            r.consecutiveErrorTimes, status);
+                }
+                r.startHeartbeatTimer(startTimeMs);
+                return;
+            }
+            r.consecutiveErrorTimes = 0;
+            if (response.getTerm() > r.options.getTerm()) {
+                if (isLogDebugEnabled) {
+                    sb.append(" fail, greater term ") //
+                            .append(response.getTerm()) //
+                            .append(" expect term ") //
+                            .append(r.options.getTerm());
+                    LOG.debug(sb.toString());
+                }
+                final NodeImpl node = r.options.getNode();
+                //新节点追赶上集群，以后成员变化会说到
+                r.notifyOnCaughtUp(RaftError.EPERM.getNumber(), true);
+                r.destroy();
+                //Leader不接受任期比自己大，increaseTermTo下线
+                node.increaseTermTo(response.getTerm(), new Status(RaftError.EHIGHERTERMRESPONSE,
+                        "Leader receives higher term heartbeat_response from peer:%s", r.options.getPeerId()));
+                return;
+            }
+            if (!response.getSuccess() && response.hasLastLogIndex()) {
+                if (isLogDebugEnabled) {
+                    sb.append(" fail, response term ") //
+                            .append(response.getTerm()) //
+                            .append(" lastLogIndex ") //
+                            .append(response.getLastLogIndex());
+                    LOG.debug(sb.toString());
+                }
+                LOG.warn("Heartbeat to peer {} failure, try to send a probe request.", r.options.getPeerId());
+                doUnlock = false;
+                //日志有异常，做AppendEntries的探测请求，对应上面Follower日志校验的逻辑
+                r.sendProbeRequest();
+                r.startHeartbeatTimer(startTimeMs);
+                return;
+            }
+            if (isLogDebugEnabled) {
+                LOG.debug(sb.toString());
+            }
+            if (rpcSendTime > r.lastRpcSendTimestamp) {
+                r.lastRpcSendTimestamp = rpcSendTime;
+            }
+            r.startHeartbeatTimer(startTimeMs);
+        } finally {
+            if (doUnlock) {
+                id.unlock();
+            }
+        }
+    }
+
+    State getState() {
+        return this.state;
+    }
+
+    void setState(final State state) {
+        State oldState = this.state;
+        this.state = state;
+
+        if (oldState != state) {
+            ReplicatorState newState = null;
+            switch (state) {
+                case Created:
+                    newState = ReplicatorState.CREATED;
+                    break;
+                case Replicate:
+                case Snapshot:
+                    newState = ReplicatorState.ONLINE;
+                    break;
+                case Probe:
+                    newState = ReplicatorState.OFFLINE;
+                    break;
+                case Destroyed:
+                    newState = ReplicatorState.DESTROYED;
+                    break;
+            }
+
+            if (newState != null) {
+                notifyReplicatorStatusListener(this, ReplicatorEvent.STATE_CHANGED, null, newState);
+            }
+        }
+    }
 
 }

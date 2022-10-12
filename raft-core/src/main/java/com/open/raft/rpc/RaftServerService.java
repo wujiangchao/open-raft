@@ -60,7 +60,7 @@ public interface RaftServerService {
      * @param done      callback
      * @return the response message
      */
-    Message handleInstallSnapshot(InstallSnapshotRequest request, RpcRequestClosure done);
+    Message handleInstallSnapshot(RpcRequests.InstallSnapshotRequest request, RpcRequestClosure done);
 
     /**
      * Handle time-out-now request, return response message or
@@ -70,7 +70,7 @@ public interface RaftServerService {
      * @param done      callback
      * @return the response message
      */
-    Message handleTimeoutNowRequest(TimeoutNowRequest request, RpcRequestClosure done);
+    Message handleTimeoutNowRequest(RpcRequests.TimeoutNowRequest request, RpcRequestClosure done);
 
     /**
      * Handle read-index request, call the RPC closure with response.
@@ -78,5 +78,5 @@ public interface RaftServerService {
      * @param request   data of the readIndex read
      * @param done      callback
      */
-    void handleReadIndexRequest(ReadIndexRequest request, RpcResponseClosure<ReadIndexResponse> done);
+    void handleReadIndexRequest(RpcRequests.ReadIndexRequest request, RpcResponseClosure<RpcRequests.ReadIndexResponse> done);
 }
