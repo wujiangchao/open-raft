@@ -5,6 +5,7 @@ import com.open.raft.entity.PeerId;
 import com.open.raft.option.RaftOptions;
 import com.open.raft.option.ReplicatorGroupOptions;
 import com.open.raft.option.ReplicatorOptions;
+import com.open.raft.rpc.RaftClientService;
 import com.open.raft.rpc.RpcRequests;
 import com.open.raft.rpc.RpcResponseClosure;
 import com.open.raft.util.Requires;

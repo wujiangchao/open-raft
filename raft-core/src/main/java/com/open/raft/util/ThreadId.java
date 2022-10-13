@@ -1,10 +1,9 @@
 package com.open.raft.util;
 
-import com.open.raft.core.Replicator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * @Description TODO
@@ -12,8 +11,17 @@ import java.util.concurrent.TimeUnit;
  * @Author jack wu
  */
 public class ThreadId {
-    private static final Logger LOG = LoggerFactory.getLogger(Replicator.class);
+    private static final Logger LOG = LoggerFactory.getLogger(ThreadId.class);
+    private final Object data;
+    private final ReentrantLock lock = new ReentrantLock();
+    private final OnError onError;
+    private volatile boolean destroyed;
 
+    public ThreadId(Object data, OnError onError) {
+        this.data = data;
+        this.onError = onError;
+        this.destroyed = false;
+    }
 
     public interface OnError {
 
@@ -30,6 +38,7 @@ public class ThreadId {
     /**
      * Set error code, run the onError callback
      * with code immediately in lock.
+     *
      * @param errorCode error code
      */
     public void setError(final int errorCode) {
@@ -55,4 +64,17 @@ public class ThreadId {
         }
     }
 
+    public Object lock() {
+        if (this.destroyed) {
+            return null;
+        }
+        this.lock.lock();
+        // Got the lock, double checking state.
+        if (this.destroyed) {
+            // should release lock
+            this.lock.unlock();
+            return null;
+        }
+        return this.data;
+    }
 }

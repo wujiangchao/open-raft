@@ -99,4 +99,13 @@ public class Utils {
         });
     }
 
+    /**
+     * Returns the current time in milliseconds, it's not monotonic, would be forwarded/backward by
+     * clock synchronous.
+     */
+    public static long nowMs() {
+        return System.currentTimeMillis();
+    }
+
+
 }

@@ -3,13 +3,18 @@ package com.open.raft.core;
 import com.codahale.metrics.MetricRegistry;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Message;
+import com.open.raft.INode;
 import com.open.raft.Status;
+import com.open.raft.closure.CatchUpClosure;
+import com.open.raft.entity.PeerId;
 import com.open.raft.error.RaftError;
 import com.open.raft.option.RaftOptions;
 import com.open.raft.option.ReplicatorOptions;
+import com.open.raft.rpc.RaftClientService;
 import com.open.raft.rpc.RpcRequests;
 import com.open.raft.rpc.RpcResponseClosure;
 import com.open.raft.rpc.RpcResponseClosureAdapter;
+import com.open.raft.rpc.RpcUtils;
 import com.open.raft.util.Requires;
 import com.open.raft.util.ThreadId;
 import com.open.raft.util.Utils;
@@ -17,7 +22,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.annotation.concurrent.ThreadSafe;
+import java.util.ArrayDeque;
 import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -34,9 +41,29 @@ public class Replicator  implements ThreadId.OnError {
 
     private final ReplicatorOptions options;
     private final RaftOptions raftOptions;
+    protected ThreadId id;
 
     private volatile State state;
 
+    private volatile long lastRpcSendTimestamp;
+    private volatile long heartbeatCounter = 0;
+    private volatile long probeCounter = 0;
+    private volatile long appendEntriesCounter = 0;
+    private volatile long installSnapshotCounter = 0;
+
+    private ScheduledFuture<?> heartbeatTimer;
+    private volatile SnapshotReader reader;
+    private CatchUpClosure catchUpClosure;
+    private final Scheduler timerManager;
+
+    // Cached the latest RPC in-flight request.
+    private Inflight rpcInFly;
+    // Heartbeat RPC future
+    private Future<Message> heartbeatInFly;
+    // Timeout request RPC future
+    private Future<Message> timeoutNowInFly;
+    // In-flight RPC requests, FIFO queue
+    private final ArrayDeque<Inflight> inflights = new ArrayDeque<>();
 
 
     /**
@@ -52,10 +79,19 @@ public class Replicator  implements ThreadId.OnError {
         Destroyed // destroyed
     }
 
+    enum ReplicatorEvent {
+        CREATED, // created
+        ERROR, // error
+        DESTROYED,// destroyed
+        STATE_CHANGED; // state changed.
+    }
 
-    public Replicator(ReplicatorOptions options, RaftOptions raftOptions) {
-        this.options = options;
+
+    public Replicator(ReplicatorOptions replicatorOptions, RaftOptions raftOptions) {
+        this.options = replicatorOptions;
+        this.timerManager = replicatorOptions.getTimerManager();
         this.raftOptions = raftOptions;
+        this.rpcService = replicatorOptions.getRaftRpcService();
         setState(State.Created);
     }
 
@@ -271,8 +307,8 @@ public class Replicator  implements ThreadId.OnError {
         }
     }
 
-    static void onHeartbeatReturned(final ThreadId id, final Status status, final AppendEntriesRequest request,
-                                    final AppendEntriesResponse response, final long rpcSendTime) {
+    static void onHeartbeatReturned(final ThreadId id, final Status status, final RpcRequests.AppendEntriesRequest request,
+                                    final RpcRequests.AppendEntriesResponse response, final long rpcSendTime) {
         if (id == null) {
             // replicator already was destroyed.
             return;
@@ -391,6 +427,66 @@ public class Replicator  implements ThreadId.OnError {
                 notifyReplicatorStatusListener(this, ReplicatorEvent.STATE_CHANGED, null, newState);
             }
         }
+    }
+
+    /**
+     * Notify replicator event(such as created, error, destroyed) to replicatorStateListener which is implemented by users for none status.
+     *
+     * @param replicator replicator object
+     * @param event      replicator's state listener event type
+     */
+    private static void notifyReplicatorStatusListener(final Replicator replicator, final ReplicatorEvent event) {
+        notifyReplicatorStatusListener(replicator, event, null);
+    }
+
+    private static void notifyReplicatorStatusListener(final Replicator replicator, final ReplicatorEvent event,
+                                                       final Status status) {
+        notifyReplicatorStatusListener(replicator, event, status, null);
+    }
+
+
+    /**
+     * Notify replicator event(such as created, error, destroyed) to replicatorStateListener which is implemented by users.
+     *
+     * @param replicator replicator object
+     * @param event      replicator's state listener event type
+     * @param status     replicator's error detailed status
+     */
+    private static void notifyReplicatorStatusListener(final Replicator replicator, final ReplicatorEvent event,
+                                                       final Status status, final ReplicatorState newState) {
+        final ReplicatorOptions replicatorOpts = Requires.requireNonNull(replicator.getOpts(), "replicatorOptions");
+        final INode node = Requires.requireNonNull(replicatorOpts.getNode(), "node");
+        final PeerId peer = Requires.requireNonNull(replicatorOpts.getPeerId(), "peer");
+
+        final List<ReplicatorStateListener> listenerList = node.getReplicatorStatueListeners();
+        for (int i = 0; i < listenerList.size(); i++) {
+            final ReplicatorStateListener listener = listenerList.get(i);
+            if (listener != null) {
+                try {
+                    switch (event) {
+                        case CREATED:
+                            RpcUtils.runInThread(() -> listener.onCreated(peer));
+                            break;
+                        case ERROR:
+                            RpcUtils.runInThread(() -> listener.onError(peer, status));
+                            break;
+                        case DESTROYED:
+                            RpcUtils.runInThread(() -> listener.onDestroyed(peer));
+                            break;
+                        case STATE_CHANGED:
+                            RpcUtils.runInThread(() -> listener.stateChanged(peer, newState));
+                        default:
+                            break;
+                    }
+                } catch (final Exception e) {
+                    LOG.error("Fail to notify ReplicatorStatusListener, listener={}, event={}.", listener, event);
+                }
+            }
+        }
+    }
+
+    private void sendProbeRequest() {
+        sendEmptyEntries(false);
     }
 
 }
