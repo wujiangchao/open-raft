@@ -38,6 +38,8 @@ public class Replicator  implements ThreadId.OnError {
     private static final Logger LOG = LoggerFactory.getLogger(Replicator.class);
     private final RaftClientService rpcService;
 
+    // Next sending log index
+    private volatile long nextIndex;
 
     private final ReplicatorOptions options;
     private final RaftOptions raftOptions;
@@ -121,10 +123,12 @@ public class Replicator  implements ThreadId.OnError {
 
         // Start replication
         r.id = new ThreadId(r, r);
+        // Fixme 这里加锁不知意欲何为
         r.id.lock();
 
         //监听器ReplicatorStateListener.onCreated|onError|onDestroyed
         notifyReplicatorStatusListener(r, ReplicatorEvent.CREATED);
+
         LOG.info("Replicator={}@{} is started", r.id, r.options.getPeerId());
         r.catchUpClosure = null;
         r.lastRpcSendTimestamp = Utils.monotonicMs();
@@ -138,6 +142,7 @@ public class Replicator  implements ThreadId.OnError {
 
 
     private void startHeartbeatTimer(final long startMs) {
+        //当前毫秒数
         final long dueTime = startMs + this.options.getDynamicHeartBeatTimeoutMs();
         try {
             //心跳被作为一种超时异常处理。heartbeat为了不重复发送选择定时而非周期Timer，直到收到响应后再次计时发送。
@@ -488,5 +493,33 @@ public class Replicator  implements ThreadId.OnError {
     private void sendProbeRequest() {
         sendEmptyEntries(false);
     }
+
+    private boolean fillCommonFields(final RpcRequests.AppendEntriesRequest.Builder rb, long prevLogIndex, final boolean isHeartbeat) {
+        final long prevLogTerm = this.options.getLogManager().getTerm(prevLogIndex);
+        if (prevLogTerm == 0 && prevLogIndex != 0) {
+            if (!isHeartbeat) {
+                Requires.requireTrue(prevLogIndex < this.options.getLogManager().getFirstLogIndex());
+                LOG.debug("logIndex={} was compacted", prevLogIndex);
+                return false;
+            } else {
+                // The log at prev_log_index has been compacted, which indicates
+                // we is or is going to install snapshot to the follower. So we let
+                // both prev_log_index and prev_log_term be 0 in the heartbeat
+                // request so that follower would do nothing besides updating its
+                // leader timestamp.
+                prevLogIndex = 0;
+            }
+        }
+        rb.setTerm(this.options.getTerm());
+        rb.setGroupId(this.options.getGroupId());
+        rb.setServerId(this.options.getServerId().toString());
+        rb.setPeerId(this.options.getPeerId().toString());
+        //注意prevLogIndex是nextIndex-1，表示当前的index
+        rb.setPrevLogIndex(prevLogIndex);
+        rb.setPrevLogTerm(prevLogTerm);
+        rb.setCommittedIndex(this.options.getBallotBox().getLastCommittedIndex());
+        return true;
+    }
+
 
 }

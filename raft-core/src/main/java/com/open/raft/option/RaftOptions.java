@@ -15,6 +15,11 @@ public class RaftOptions implements Copiable<RaftOptions> {
      */
     private int applyBatch = 32;
 
+    /**
+     * Raft election:heartbeat timeout factor
+     */
+    private int electionHeartbeatFactor = 10;
+
     @Override
     public RaftOptions copy() {
         return null;
@@ -26,5 +31,13 @@ public class RaftOptions implements Copiable<RaftOptions> {
 
     public void setApplyBatch(int applyBatch) {
         this.applyBatch = applyBatch;
+    }
+
+    public int getElectionHeartbeatFactor() {
+        return electionHeartbeatFactor;
+    }
+
+    public void setElectionHeartbeatFactor(int electionHeartbeatFactor) {
+        this.electionHeartbeatFactor = electionHeartbeatFactor;
     }
 }

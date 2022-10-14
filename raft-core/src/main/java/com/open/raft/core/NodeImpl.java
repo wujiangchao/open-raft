@@ -11,6 +11,7 @@ import com.open.raft.RaftServiceFactory;
 import com.open.raft.Status;
 import com.open.raft.closure.ClosureQueue;
 import com.open.raft.closure.ClosureQueueImpl;
+import com.open.raft.conf.ConfigurationEntry;
 import com.open.raft.core.done.OnPreVoteRpcDone;
 import com.open.raft.core.done.OnRequestVoteRpcDone;
 import com.open.raft.core.event.LogEntryEvent;
@@ -28,10 +29,12 @@ import com.open.raft.option.LogManagerOptions;
 import com.open.raft.option.NodeOptions;
 import com.open.raft.option.RaftOptions;
 import com.open.raft.option.ReplicatorGroupOptions;
+import com.open.raft.rpc.RaftClientService;
 import com.open.raft.rpc.RaftServerService;
 import com.open.raft.rpc.RpcRequestClosure;
 import com.open.raft.rpc.RpcRequests;
 import com.open.raft.rpc.RpcResponseClosure;
+import com.open.raft.rpc.impl.core.DefaultRaftClientService;
 import com.open.raft.storage.LogManager;
 import com.open.raft.storage.LogStorage;
 import com.open.raft.storage.impl.LogManagerImpl;
@@ -108,6 +111,7 @@ public class NodeImpl implements INode, RaftServerService {
     protected final Lock readLock = this.readWriteLock
             .readLock();
     private volatile CountDownLatch shutdownLatch;
+    private ConfigurationEntry conf;
 
 
     private FSMCaller fsmCaller;
@@ -116,6 +120,10 @@ public class NodeImpl implements INode, RaftServerService {
     private ClosureQueue closureQueue;
     private BallotBox ballotBox;
     private ReplicatorGroup replicatorGroup;
+    private RaftClientService rpcService;
+
+    private Scheduler timerManager;
+
 
     /**
      * Disruptor to run node service
@@ -188,9 +196,16 @@ public class NodeImpl implements INode, RaftServerService {
         rgOpts.setSnapshotStorage(this.snapshotExecutor != null ? this.snapshotExecutor.getSnapshotStorage() : null);
         rgOpts.setRaftOptions(this.raftOptions);
         rgOpts.setTimerManager(this.timerManager);
+
+
+        this.replicatorGroup.init(new NodeId(this.groupId, this.serverId), rgOpts);
+
         return false;
     }
 
+    private int heartbeatTimeout(final int electionTimeout) {
+        return Math.max(electionTimeout / this.raftOptions.getElectionHeartbeatFactor(), 10);
+    }
     private boolean initLogStorage() {
         Requires.requireNonNull(this.fsmCaller, "Null fsm caller");
         this.logStorage = this.serviceFactory.createLogStorage(this.options.getLogUri(), this.raftOptions);
@@ -1149,8 +1164,8 @@ public class NodeImpl implements INode, RaftServerService {
                     switch (queuedPipelinedResponse.requestType) {
                         case AppendEntries:                        //处理日志复制的response
                             continueSendEntries = onAppendEntriesReturned(id, inflight, queuedPipelinedResponse.status,
-                                    (AppendEntriesRequest) queuedPipelinedResponse.request,
-                                    (AppendEntriesResponse) queuedPipelinedResponse.response, rpcSendTime, startTimeMs, r);
+                                    (RpcRequests.AppendEntriesRequest) queuedPipelinedResponse.request,
+                                    (RpcRequests.AppendEntriesResponse) queuedPipelinedResponse.response, rpcSendTime, startTimeMs, r);
                             break;
                         case Snapshot:     //处理快照的response
                             continueSendEntries = onInstallSnapshotReturned(id, r, queuedPipelinedResponse.status,
@@ -1181,4 +1196,11 @@ public class NodeImpl implements INode, RaftServerService {
             }
         }
     }
+
+    private void stopVoteTimer() {
+        if (this.voteTimer != null) {
+            this.voteTimer.stop();
+        }
+    }
+
 }

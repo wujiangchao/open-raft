@@ -90,4 +90,15 @@ public interface ReplicatorGroup {
      */
     void checkReplicator(final PeerId peer, final boolean lockNode);
 
+    /**
+     * Reset the term of all to-add replicators.
+     * This method is supposed to be called when the very candidate becomes the
+     * leader, so we suppose that there are no running replicators.
+     * Return true on success, false otherwise
+     *
+     * @param newTerm new term num
+     * @return true on success
+     */
+    boolean resetTerm(final long newTerm);
+
 }

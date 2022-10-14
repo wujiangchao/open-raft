@@ -41,7 +41,26 @@ public class ReplicatorGroupImpl implements ReplicatorGroup {
 
     @Override
     public boolean init(NodeId nodeId, ReplicatorGroupOptions opts) {
-        return false;
+        // 值为 Math.max(electionTimeout / this.raftOptions.getElectionHeartbeatFactor(), 10);
+        this.dynamicTimeoutMs = opts.getHeartbeatTimeoutMs();
+
+        this.electionTimeoutMs = opts.getElectionTimeoutMs();
+
+        this.raftOptions = opts.getRaftOptions();
+        this.commonOptions = new ReplicatorOptions();
+        this.commonOptions.setDynamicHeartBeatTimeoutMs(this.dynamicTimeoutMs);
+        this.commonOptions.setElectionTimeoutMs(this.electionTimeoutMs);
+        this.commonOptions.setRaftRpcService(opts.getRaftRpcClientService());
+        this.commonOptions.setLogManager(opts.getLogManager());
+        this.commonOptions.setBallotBox(opts.getBallotBox());
+        this.commonOptions.setNode(opts.getNode());
+        // term 从零开始
+        this.commonOptions.setTerm(0);
+        this.commonOptions.setGroupId(nodeId.getGroupId());
+        this.commonOptions.setServerId(nodeId.getPeerId());
+        this.commonOptions.setSnapshotStorage(opts.getSnapshotStorage());
+        this.commonOptions.setTimerManager(opts.getTimerManager());
+        return true;
     }
 
     /**
@@ -96,5 +115,14 @@ public class ReplicatorGroupImpl implements ReplicatorGroup {
     @Override
     public void checkReplicator(PeerId peer, boolean lockNode) {
 
+    }
+
+    @Override
+    public boolean resetTerm(long newTerm) {
+        if (newTerm <= this.commonOptions.getTerm()) {
+            return false;
+        }
+        this.commonOptions.setTerm(newTerm);
+        return true;
     }
 }
