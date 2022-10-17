@@ -11,7 +11,10 @@ import com.open.raft.RaftServiceFactory;
 import com.open.raft.Status;
 import com.open.raft.closure.ClosureQueue;
 import com.open.raft.closure.ClosureQueueImpl;
+import com.open.raft.closure.LeaderStableClosure;
+import com.open.raft.conf.Configuration;
 import com.open.raft.conf.ConfigurationEntry;
+import com.open.raft.core.done.ConfigurationChangeDone;
 import com.open.raft.core.done.OnPreVoteRpcDone;
 import com.open.raft.core.done.OnRequestVoteRpcDone;
 import com.open.raft.core.event.LogEntryEvent;
@@ -121,6 +124,7 @@ public class NodeImpl implements INode, RaftServerService {
     private BallotBox ballotBox;
     private ReplicatorGroup replicatorGroup;
     private RaftClientService rpcService;
+    private final ConfigurationCtx confCtx;
 
     private Scheduler timerManager;
 
@@ -143,7 +147,7 @@ public class NodeImpl implements INode, RaftServerService {
         this.currTerm = 0;
         //设置最新的时间戳
         updateLastLeaderTimestamp(Utils.monotonicMs());
-//        this.confCtx = new ConfigurationCtx(this);
+        this.confCtx = new ConfigurationCtx(this);
         final int num = GLOBAL_NUM_NODES.incrementAndGet();
         LOG.info("The number of active nodes increment to {}.", num);
     }
@@ -430,6 +434,11 @@ public class NodeImpl implements INode, RaftServerService {
                 }
                 break;
         }
+    }
+
+    @Override
+    public NodeOptions getOptions() {
+        return options;
     }
 
     /**
@@ -1202,5 +1211,44 @@ public class NodeImpl implements INode, RaftServerService {
             this.voteTimer.stop();
         }
     }
+
+    public void unsafeApplyConfiguration(final Configuration newConf, final Configuration oldConf,
+                                          final boolean leaderStart) {
+        Requires.requireTrue(this.confCtx.isBusy(), "ConfigurationContext is not busy");
+        final LogEntry entry = new LogEntry(EnumOutter.EntryType.ENTRY_TYPE_CONFIGURATION);
+        entry.setId(new LogId(0, this.currTerm));
+        entry.setPeers(newConf.listPeers());
+        entry.setLearners(newConf.listLearners());
+        if (oldConf != null) {
+            entry.setOldPeers(oldConf.listPeers());
+            entry.setOldLearners(oldConf.listLearners());
+        }
+        final ConfigurationChangeDone configurationChangeDone = new ConfigurationChangeDone(this.currTerm, leaderStart,this);
+        // Use the new_conf to deal the quorum of this very log
+        if (!this.ballotBox.appendPendingTask(newConf, oldConf, configurationChangeDone)) {
+            Utils.runClosureInThread(configurationChangeDone, new Status(RaftError.EINTERNAL, "Fail to append task."));
+            return;
+        }
+        final List<LogEntry> entries = new ArrayList<>();
+        entries.add(entry);
+        this.logManager.appendEntries(entries, new LeaderStableClosure(entries,this));
+        checkAndSetConfiguration(false);
+    }
+
+    public void onConfigurationChangeDone(final long term) {
+        this.writeLock.lock();
+        try {
+            if (term != this.currTerm || this.state.compareTo(State.STATE_TRANSFERRING) > 0) {
+                LOG.warn("Node {} process onConfigurationChangeDone at term {} while state={}, currTerm={}.",
+                        getNodeId(), term, this.state, this.currTerm);
+                return;
+            }
+            this.confCtx.nextStage();
+        } finally {
+            this.writeLock.unlock();
+        }
+    }
+
+
 
 }

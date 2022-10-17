@@ -6,7 +6,9 @@ import com.google.protobuf.Message;
 import com.open.raft.INode;
 import com.open.raft.Status;
 import com.open.raft.closure.CatchUpClosure;
+import com.open.raft.entity.EnumOutter;
 import com.open.raft.entity.PeerId;
+import com.open.raft.entity.RaftOutter;
 import com.open.raft.error.RaftError;
 import com.open.raft.option.RaftOptions;
 import com.open.raft.option.ReplicatorOptions;
@@ -94,6 +96,8 @@ public class Replicator  implements ThreadId.OnError {
         this.timerManager = replicatorOptions.getTimerManager();
         this.raftOptions = raftOptions;
         this.rpcService = replicatorOptions.getRaftRpcService();
+        // nextIndex从 1 开始
+        this.nextIndex = this.options.getLogManager().getLastLogIndex() + 1;
         setState(State.Created);
     }
 
@@ -136,6 +140,7 @@ public class Replicator  implements ThreadId.OnError {
         r.startHeartbeatTimer(Utils.nowMs());
         // id.unlock in sendEmptyEntries
         //这里应该是为了把becomeLeader()->this.confCtx.flush更新的配置日志同步出去，并unlock
+        //startHeartbeatTimer  在线程中执行，所以 可能先发送 探针
         r.sendProbeRequest();
         return r.id;
     }
@@ -497,6 +502,7 @@ public class Replicator  implements ThreadId.OnError {
     private boolean fillCommonFields(final RpcRequests.AppendEntriesRequest.Builder rb, long prevLogIndex, final boolean isHeartbeat) {
         final long prevLogTerm = this.options.getLogManager().getTerm(prevLogIndex);
         if (prevLogTerm == 0 && prevLogIndex != 0) {
+
             if (!isHeartbeat) {
                 Requires.requireTrue(prevLogIndex < this.options.getLogManager().getFirstLogIndex());
                 LOG.debug("logIndex={} was compacted", prevLogIndex);
@@ -519,6 +525,108 @@ public class Replicator  implements ThreadId.OnError {
         rb.setPrevLogTerm(prevLogTerm);
         rb.setCommittedIndex(this.options.getBallotBox().getLastCommittedIndex());
         return true;
+    }
+
+    /**
+     * 校验用户是否设置配置参数类 NodeOptions 的“snapshotUri”属性，如果没有设置就不会开启快照，返回reader就为空
+     * 是否可以返回一个获取快照的uri
+     * 能否从获取从文件加载的元数据信息
+     * 如果上面的校验都通过的话，那么就会发送一个InstallSnapshotRequest请求到Follower，交给InstallSnapshotRequestProcessor处理器处理，
+     * 最后会跳转到NodeImpl的handleInstallSnapshot方法执行具体逻辑
+     */
+    void installSnapshot() {
+        //正在安装快照
+        if (getState() == State.Snapshot) {
+            LOG.warn("Replicator {} is installing snapshot, ignore the new request.", this.options.getPeerId());
+            unlockId();
+            return;
+        }
+        boolean doUnlock = true;
+        if (!this.rpcService.connect(this.options.getPeerId().getEndpoint())) {
+            LOG.error("Fail to check install snapshot connection to peer={}, give up to send install snapshot request.", this.options.getPeerId().getEndpoint());
+            block(Utils.nowMs(), RaftError.EHOSTDOWN.getNumber());
+            return;
+        }
+        try {
+            Requires.requireTrue(this.reader == null,
+                    "Replicator %s already has a snapshot reader, current state is %s", this.options.getPeerId(),
+                    getState());
+            //初始化SnapshotReader
+            this.reader = this.options.getSnapshotStorage().open();
+            //如果快照存储功能没有开启，则设置错误信息并返回
+            if (this.reader == null) {
+                final NodeImpl node = this.options.getNode();
+                final RaftException error = new RaftException(EnumOutter.ErrorType.ERROR_TYPE_SNAPSHOT);
+                error.setStatus(new Status(RaftError.EIO, "Fail to open snapshot"));
+                unlockId();
+                doUnlock = false;
+                node.onError(error);
+                return;
+            }
+
+            //生成一个读uri连接，给其他节点读取快照
+            final String uri = this.reader.generateURIForCopy();
+            if (uri == null) {
+                final NodeImpl node = this.options.getNode();
+                final RaftException error = new RaftException(EnumOutter.ErrorType.ERROR_TYPE_SNAPSHOT);
+                error.setStatus(new Status(RaftError.EIO, "Fail to generate uri for snapshot reader"));
+                releaseReader();
+                unlockId();
+                doUnlock = false;
+                node.onError(error);
+                return;
+            }
+
+            //获取从文件加载的元数据信息
+            final RaftOutter.SnapshotMeta meta = this.reader.load();
+            if (meta == null) {
+                final String snapshotPath = this.reader.getPath();
+                final NodeImpl node = this.options.getNode();
+                final RaftException error = new RaftException(EnumOutter.ErrorType.ERROR_TYPE_SNAPSHOT);
+                error.setStatus(new Status(RaftError.EIO, "Fail to load meta from %s", snapshotPath));
+                releaseReader();
+                unlockId();
+                doUnlock = false;
+                node.onError(error);
+                return;
+            }
+
+            //设置请求参数
+            final InstallSnapshotRequest.Builder rb = InstallSnapshotRequest.newBuilder();
+            rb.setTerm(this.options.getTerm());
+            rb.setGroupId(this.options.getGroupId());
+            rb.setServerId(this.options.getServerId().toString());
+            rb.setPeerId(this.options.getPeerId().toString());
+            rb.setMeta(meta);
+            rb.setUri(uri);
+
+            this.statInfo.runningState = RunningState.INSTALLING_SNAPSHOT;
+            this.statInfo.lastLogIncluded = meta.getLastIncludedIndex();
+            this.statInfo.lastTermIncluded = meta.getLastIncludedTerm();
+
+            final InstallSnapshotRequest request = rb.build();
+            setState(State.Snapshot);
+            // noinspection NonAtomicOperationOnVolatileField
+            this.installSnapshotCounter++;
+            final long monotonicSendTimeMs = Utils.monotonicMs();
+            final int stateVersion = this.version;
+            final int seq = getAndIncrementReqSeq();
+            //发起InstallSnapshotRequest请求
+            final Future<Message> rpcFuture = this.rpcService.installSnapshot(this.options.getPeerId().getEndpoint(),
+                    request, new RpcResponseClosureAdapter<InstallSnapshotResponse>() {
+
+                        @Override
+                        public void run(final Status status) {
+                            onRpcReturned(Replicator.this.id, RequestType.Snapshot, status, request, getResponse(), seq,
+                                    stateVersion, monotonicSendTimeMs);
+                        }
+                    });
+            addInflight(RequestType.Snapshot, this.nextIndex, 0, 0, seq, rpcFuture);
+        } finally {
+            if (doUnlock) {
+                unlockId();
+            }
+        }
     }
 
 

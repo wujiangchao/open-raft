@@ -23,7 +23,7 @@ public class OnPreVoteRpcDone extends RpcResponseClosureAdapter<RpcRequests.Requ
     final PeerId peer;
     final NodeImpl node;
     final long term;
-    RpcRequests.RequestVoteRequest request;
+    public RpcRequests.RequestVoteRequest request;
 
     public OnPreVoteRpcDone(final PeerId peer, final NodeImpl node, long term) {
         super();

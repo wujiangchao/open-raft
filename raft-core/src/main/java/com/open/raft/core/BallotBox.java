@@ -19,6 +19,9 @@ import org.slf4j.LoggerFactory;
 public class BallotBox implements Lifecycle<BallotBoxOptions> {
     private static final Logger LOG = LoggerFactory.getLogger(BallotBox.class);
 
+    private long lastCommittedIndex = 0;
+
+
     private FSMCaller waiter;
     private ClosureQueue closureQueue;
     private final SegmentList<Ballot> pendingMetaQueue   = new SegmentList<>(false);
@@ -74,5 +77,13 @@ public class BallotBox implements Lifecycle<BallotBoxOptions> {
     @Override
     public void shutdown() {
 
+    }
+
+    public long getLastCommittedIndex() {
+        return lastCommittedIndex;
+    }
+
+    public void setLastCommittedIndex(long lastCommittedIndex) {
+        this.lastCommittedIndex = lastCommittedIndex;
     }
 }

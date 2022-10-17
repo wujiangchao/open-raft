@@ -4,6 +4,7 @@ import com.open.raft.entity.NodeId;
 import com.open.raft.entity.PeerId;
 import com.open.raft.entity.Task;
 import com.open.raft.option.NodeOptions;
+import com.open.raft.option.RaftOptions;
 
 /**
  * @Description define raft node
@@ -43,5 +44,15 @@ public interface INode extends Lifecycle<NodeOptions> {
      * @param task task to apply
      */
     void apply(final Task task);
+
+    /**
+     * Get the node options.
+     */
+    NodeOptions getOptions();
+
+    /**
+     * Get the raft options
+     */
+    RaftOptions getRaftOptions();
 
 }

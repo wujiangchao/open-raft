@@ -37,6 +37,11 @@ public enum RaftError {
      */
     ETIMEDOUT(1010),
 
+    /**
+     * Internal exception
+     */
+    EINTERNAL(1004),
+
 
     /**
      * All Kinds of Timeout(Including Election_timeout, Timeout_now, Stepdown_timeout)
