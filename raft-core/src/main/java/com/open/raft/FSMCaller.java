@@ -16,4 +16,12 @@ public interface FSMCaller extends Lifecycle<FSMCallerOptions>{
      * @param ctx context of leader change
      */
     boolean onStopFollowing(final LeaderChangeContext ctx);
+
+    /**
+     * Called when log entry committed
+     *
+     * @param committedIndex committed log index
+     */
+    boolean onCommitted(final long committedIndex);
+
 }

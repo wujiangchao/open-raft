@@ -13,16 +13,23 @@ import com.open.raft.FSMCaller;
 import com.open.raft.StateMachine;
 import com.open.raft.Status;
 import com.open.raft.closure.ClosureQueue;
+import com.open.raft.closure.TaskClosure;
 import com.open.raft.entity.EnumOutter;
 import com.open.raft.entity.LeaderChangeContext;
+import com.open.raft.entity.LogEntry;
+import com.open.raft.entity.LogId;
 import com.open.raft.option.FSMCallerOptions;
+import com.open.raft.storage.LogManager;
+import com.open.raft.util.Requires;
+import com.open.raft.util.Utils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.logging.LogManager;
 
 /**
  * @Description TODO
@@ -144,6 +151,14 @@ public class FSMCallerImpl implements FSMCaller {
     }
 
     @Override
+    public boolean onCommitted(long committedIndex) {
+        return enqueueTask((task, sequence) -> {
+            task.type = TaskType.COMMITTED;
+            task.committedIndex = committedIndex;
+        });
+    }
+
+    @Override
     public boolean init(FSMCallerOptions opts) {
         this.logManager = opts.getLogManager();
         this.fsm = opts.getFsm();
@@ -188,5 +203,175 @@ public class FSMCallerImpl implements FSMCaller {
     @Override
     public void shutdown() {
 
+    }
+
+    @SuppressWarnings("ConstantConditions")
+    private long runApplyTask(final ApplyTask task, long maxCommittedIndex, final boolean endOfBatch) {
+        CountDownLatch shutdown = null;
+        if (task.type == TaskType.COMMITTED) {
+            if (task.committedIndex > maxCommittedIndex) {
+                maxCommittedIndex = task.committedIndex;
+            }
+            task.reset();
+        } else {
+            if (maxCommittedIndex >= 0) {
+                this.currTask = TaskType.COMMITTED;
+                doCommitted(maxCommittedIndex);
+                maxCommittedIndex = -1L; // reset maxCommittedIndex
+            }
+            final long startMs = Utils.monotonicMs();
+            try {
+                switch (task.type) {
+                    case COMMITTED:
+                        Requires.requireTrue(false, "Impossible");
+                        break;
+                    case SNAPSHOT_SAVE:
+                        this.currTask = TaskType.SNAPSHOT_SAVE;
+                        if (passByStatus(task.done)) {
+                            doSnapshotSave((SaveSnapshotClosure) task.done);
+                        }
+                        break;
+                    case SNAPSHOT_LOAD:
+                        this.currTask = TaskType.SNAPSHOT_LOAD;
+                        if (passByStatus(task.done)) {
+                            doSnapshotLoad((LoadSnapshotClosure) task.done);
+                        }
+                        break;
+                    case LEADER_STOP:
+                        this.currTask = TaskType.LEADER_STOP;
+                        doLeaderStop(task.status);
+                        break;
+                    case LEADER_START:
+                        this.currTask = TaskType.LEADER_START;
+                        doLeaderStart(task.term);
+                        break;
+                    case START_FOLLOWING:
+                        this.currTask = TaskType.START_FOLLOWING;
+                        doStartFollowing(task.leaderChangeCtx);
+                        break;
+                    case STOP_FOLLOWING:
+                        this.currTask = TaskType.STOP_FOLLOWING;
+                        doStopFollowing(task.leaderChangeCtx);
+                        break;
+                    case ERROR:
+                        this.currTask = TaskType.ERROR;
+                        doOnError((OnErrorClosure) task.done);
+                        break;
+                    case IDLE:
+                        Requires.requireTrue(false, "Can't reach here");
+                        break;
+                    case SHUTDOWN:
+                        this.currTask = TaskType.SHUTDOWN;
+                        shutdown = task.shutdownLatch;
+                        break;
+                    case FLUSH:
+                        this.currTask = TaskType.FLUSH;
+                        shutdown = task.shutdownLatch;
+                        break;
+                }
+            } finally {
+                this.nodeMetrics.recordLatency(task.type.metricName(), Utils.monotonicMs() - startMs);
+                task.reset();
+            }
+        }
+        try {
+            if (endOfBatch && maxCommittedIndex >= 0) {
+                this.currTask = TaskType.COMMITTED;
+                doCommitted(maxCommittedIndex);
+                maxCommittedIndex = -1L; // reset maxCommittedIndex
+            }
+            this.currTask = TaskType.IDLE;
+            return maxCommittedIndex;
+        } finally {
+            if (shutdown != null) {
+                shutdown.countDown();
+            }
+        }
+    }
+
+    private void doCommitted(final long committedIndex) {
+        if (!this.error.getStatus().isOk()) {
+            return;
+        }
+        final long lastAppliedIndex = this.lastAppliedIndex.get();
+        // We can tolerate the disorder of committed_index
+        if (lastAppliedIndex >= committedIndex) {
+            return;
+        }
+        final long startMs = Utils.monotonicMs();
+        try {
+            final List<Closure> closures = new ArrayList<>();
+            final List<TaskClosure> taskClosures = new ArrayList<>();
+            final long firstClosureIndex = this.closureQueue.popClosureUntil(committedIndex, closures, taskClosures);
+
+            // Calls TaskClosure#onCommitted if necessary
+            onTaskCommitted(taskClosures);
+
+            Requires.requireTrue(firstClosureIndex >= 0, "Invalid firstClosureIndex");
+            final IteratorImpl iterImpl = new IteratorImpl(this.fsm, this.logManager, closures, firstClosureIndex,
+                    lastAppliedIndex, committedIndex, this.applyingIndex);
+            while (iterImpl.isGood()) {
+                final LogEntry logEntry = iterImpl.entry();
+                if (logEntry.getType() != EnumOutter.EntryType.ENTRY_TYPE_DATA) {
+                    if (logEntry.getType() == EnumOutter.EntryType.ENTRY_TYPE_CONFIGURATION) {
+                        if (logEntry.getOldPeers() != null && !logEntry.getOldPeers().isEmpty()) {
+                            // Joint stage is not supposed to be noticeable by end users.
+                            this.fsm.onConfigurationCommitted(new Configuration(iterImpl.entry().getPeers()));
+                        }
+                    }
+                    if (iterImpl.done() != null) {
+                        // For other entries, we have nothing to do besides flush the
+                        // pending tasks and run this closure to notify the caller that the
+                        // entries before this one were successfully committed and applied.
+                        iterImpl.done().run(Status.OK());
+                    }
+                    iterImpl.next();
+                    continue;
+                }
+
+                // Apply data task to user state machine
+                doApplyTasks(iterImpl);
+            }
+
+            if (iterImpl.hasError()) {
+                setError(iterImpl.getError());
+                iterImpl.runTheRestClosureWithError();
+            }
+            final long lastIndex = iterImpl.getIndex() - 1;
+            final long lastTerm = this.logManager.getTerm(lastIndex);
+            final LogId lastAppliedId = new LogId(lastIndex, lastTerm);
+            this.lastAppliedIndex.set(lastIndex);
+            this.lastAppliedTerm = lastTerm;
+            this.logManager.setAppliedId(lastAppliedId);
+            notifyLastAppliedIndexUpdated(lastIndex);
+        } finally {
+            this.nodeMetrics.recordLatency("fsm-commit", Utils.monotonicMs() - startMs);
+        }
+    }
+
+
+    private void doApplyTasks(final IteratorImpl iterImpl) {
+        final IteratorWrapper iter = new IteratorWrapper(iterImpl);
+        final long startApplyMs = Utils.monotonicMs();
+        final long startIndex = iter.getIndex();
+        try {
+            //执行具体的业务
+            this.fsm.onApply(iter);
+        } finally {
+            this.nodeMetrics.recordLatency("fsm-apply-tasks", Utils.monotonicMs() - startApplyMs);
+            this.nodeMetrics.recordSize("fsm-apply-tasks-count", iter.getIndex() - startIndex);
+        }
+        if (iter.hasNext()) {
+            LOG.error("Iterator is still valid, did you return before iterator reached the end?");
+        }
+        // Try move to next in case that we pass the same log twice.
+        iter.next();
+    }
+
+    private void onTaskCommitted(final List<TaskClosure> closures) {
+        for (int i = 0, size = closures.size(); i < size; i++) {
+            final TaskClosure done = closures.get(i);
+            done.onCommitted();
+        }
     }
 }

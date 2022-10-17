@@ -495,6 +495,17 @@ public class Replicator  implements ThreadId.OnError {
         }
     }
 
+    /**
+     * 其实就是用来探测各种异常情况，或者探测当前节点的nextIndex。
+     *
+     * 什么时候发送探测消息？
+     *
+     * 节点刚成为leader（start）
+     * 发送日志超时的时候，会发送探测消息。
+     * 如果响应超时，如果jraft打开pipeline，会有一个pendingResponses阈值。如果响应队列数据大于这个值会调用该方法，并不会在响应超时的时候，无限loop。
+     * 收到无效的日志请求。
+     * 发送日志请求不成功
+     */
     private void sendProbeRequest() {
         sendEmptyEntries(false);
     }

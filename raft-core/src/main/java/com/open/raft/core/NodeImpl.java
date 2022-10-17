@@ -24,6 +24,7 @@ import com.open.raft.entity.LogEntry;
 import com.open.raft.entity.LogId;
 import com.open.raft.entity.NodeId;
 import com.open.raft.entity.PeerId;
+import com.open.raft.entity.RaftOutter;
 import com.open.raft.entity.Task;
 import com.open.raft.error.OverloadException;
 import com.open.raft.error.RaftError;
@@ -48,6 +49,7 @@ import com.open.raft.util.concurrent.NodeReadWriteLock;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -613,6 +615,11 @@ public class NodeImpl implements INode, RaftServerService {
     }
 
     /**
+     * 完整信息: (currentTerm, logEntries[], prevTerm, prevLogIndex, commitTerm, commitLogIndex)
+     * currentTerm, logEntries[]：日志信息，为了效率，日志通常为多条
+     * prevTerm, prevLogIndex：日志有效性检查
+     * commitTerm, commitLogIndex：最新的提交日志位点(commitIndex)
+     *
      * 校验当前的Node节点是否还处于活跃状态，如果不是的话，那么直接返回一个error的response
      * 校验请求的serverId的格式是否正确，不正确则返回一个error的response
      * 校验请求的任期是否小于当前的任期，如果是那么返回一个AppendEntriesResponse类型的response
@@ -740,11 +747,73 @@ public class NodeImpl implements INode, RaftServerService {
                 this.ballotBox.setLastCommittedIndex(Math.min(request.getCommittedIndex(), prevLogIndex));
                 return respBuilder.build();
             }
+            // fast checking if log manager is overloaded
+            if (!this.logManager.hasAvailableCapacityToAppendEntries(1)) {
+                LOG.warn("Node {} received AppendEntriesRequest but log manager is busy.", getNodeId());
+                return RpcFactoryHelper //
+                        .responseFactory() //
+                        .newResponse(AppendEntriesResponse.getDefaultInstance(), RaftError.EBUSY,
+                                "Node %s:%s log manager is busy.", this.groupId, this.serverId);
+            }
 
+            // Parse request
+            long index = prevLogIndex;
+            //获取所有数据
+            final List<LogEntry> entries = new ArrayList<>(entriesCount);
+            ByteBuffer allData = null;
+            if (request.hasData()) {
+                allData = request.getData().asReadOnlyByteBuffer();
+            }
+
+            final List<RaftOutter.EntryMeta> entriesList = request.getEntriesList();
+            for (int i = 0; i < entriesCount; i++) {
+                index++;
+                final RaftOutter.EntryMeta entry = entriesList.get(i);
+                //给logEntry属性设值     将数据填充到logEntry
+                final LogEntry logEntry = logEntryFromMeta(index, allData, entry);
+
+                if (logEntry != null) {
+                    // Validate checksum
+                    if (this.raftOptions.isEnableLogEntryChecksum() && logEntry.isCorrupted()) {
+                        long realChecksum = logEntry.checksum();
+                        LOG.error(
+                                "Corrupted log entry received from leader, index={}, term={}, expectedChecksum={}, realChecksum={}",
+                                logEntry.getId().getIndex(), logEntry.getId().getTerm(), logEntry.getChecksum(),
+                                realChecksum);
+                        return RpcFactoryHelper //
+                                .responseFactory() //
+                                .newResponse(AppendEntriesResponse.getDefaultInstance(), RaftError.EINVAL,
+                                        "The log entry is corrupted, index=%d, term=%d, expectedChecksum=%d, realChecksum=%d",
+                                        logEntry.getId().getIndex(), logEntry.getId().getTerm(), logEntry.getChecksum(),
+                                        realChecksum);
+                    }
+                    entries.add(logEntry);
+                }
+            }
+
+            //存储日志，并回调返回response
+            final FollowerStableClosure closure = new FollowerStableClosure(request, AppendEntriesResponse.newBuilder()
+                    .setTerm(this.currTerm), this, done, this.currTerm);
+            this.logManager.appendEntries(entries, closure);
+            // update configuration after _log_manager updated its memory status
+            checkAndSetConfiguration(true);
+            success = true;
+            return null;
         } finally {
-
+            if (doUnlock) {
+                this.writeLock.unlock();
+            }
+            final long processLatency = Utils.monotonicMs() - startMs;
+            if (entriesCount == 0) {
+                this.metrics.recordLatency("handle-heartbeat-requests", processLatency);
+            } else {
+                this.metrics.recordLatency("handle-append-entries", processLatency);
+            }
+            if (success) {
+                // Don't stats heartbeat requests.
+                this.metrics.recordSize("handle-append-entries-count", entriesCount);
+            }
         }
-        return null;
     }
 
     @Override
