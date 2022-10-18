@@ -42,6 +42,24 @@ public enum RaftError {
      */
     EINTERNAL(1004),
 
+    /**
+     * <pre>
+     * Receive Higher Term Requests
+     * </pre>
+     * <p>
+     * <code>EHIGHERTERMREQUEST = 10007;</code>
+     */
+    EHIGHERTERMREQUEST(10007),
+
+    /**
+     * <pre>
+     * Receive Higher Term Response
+     * </pre>
+     * <p>
+     * <code>EHIGHERTERMRESPONSE = 10008;</code>
+     */
+    EHIGHERTERMRESPONSE(10008),
+
 
     /**
      * All Kinds of Timeout(Including Election_timeout, Timeout_now, Stepdown_timeout)

@@ -20,6 +20,11 @@ public class RaftOptions implements Copiable<RaftOptions> {
      */
     private int electionHeartbeatFactor = 10;
 
+    /**
+     * The maximum replicator pipeline in-flight requests/responses, only valid when enable replicator pipeline.
+     */
+    private int maxReplicatorInflightMsgs = 256;
+
     @Override
     public RaftOptions copy() {
         return null;
@@ -39,5 +44,13 @@ public class RaftOptions implements Copiable<RaftOptions> {
 
     public void setElectionHeartbeatFactor(int electionHeartbeatFactor) {
         this.electionHeartbeatFactor = electionHeartbeatFactor;
+    }
+
+    public int getMaxReplicatorInflightMsgs() {
+        return maxReplicatorInflightMsgs;
+    }
+
+    public void setMaxReplicatorInflightMsgs(int maxReplicatorInflightMsgs) {
+        this.maxReplicatorInflightMsgs = maxReplicatorInflightMsgs;
     }
 }

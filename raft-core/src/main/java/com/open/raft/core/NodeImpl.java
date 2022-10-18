@@ -42,6 +42,7 @@ import com.open.raft.rpc.impl.core.DefaultRaftClientService;
 import com.open.raft.storage.LogManager;
 import com.open.raft.storage.LogStorage;
 import com.open.raft.storage.impl.LogManagerImpl;
+import com.open.raft.util.RepeatedTimer;
 import com.open.raft.util.Requires;
 import com.open.raft.util.ThreadId;
 import com.open.raft.util.Utils;
@@ -87,11 +88,6 @@ public class NodeImpl implements INode, RaftServerService {
     private final String groupId;
     private NodeOptions options;
 
-    public RaftOptions getRaftOptions() {
-        return raftOptions;
-    }
-
-
     private RaftOptions raftOptions;
     private final PeerId serverId;
 
@@ -128,8 +124,14 @@ public class NodeImpl implements INode, RaftServerService {
     private RaftClientService rpcService;
     private final ConfigurationCtx confCtx;
 
+    /**
+     * Timers
+     */
     private Scheduler timerManager;
-
+    private RepeatedTimer electionTimer;
+    private RepeatedTimer voteTimer;
+    private RepeatedTimer stepDownTimer;
+    private RepeatedTimer snapshotTimer;
 
     /**
      * Disruptor to run node service
@@ -169,7 +171,7 @@ public class NodeImpl implements INode, RaftServerService {
 
 
         //fsmCaller封装对业务 StateMachine 的状态转换的调用以及日志的写入等
-        this.fsmCaller = new FSMCallerImpl(lastAppliedIndex, applyingIndex);
+        this.fsmCaller = new FSMCallerImpl();
 
         //初始化日志存储功能
         if (!initLogStorage()) {
@@ -783,7 +785,7 @@ public class NodeImpl implements INode, RaftServerService {
                                 realChecksum);
                         return RpcFactoryHelper //
                                 .responseFactory() //
-                                .newResponse(AppendEntriesResponse.getDefaultInstance(), RaftError.EINVAL,
+                                .newResponse(RpcRequests.AppendEntriesResponse.getDefaultInstance(), RaftError.EINVAL,
                                         "The log entry is corrupted, index=%d, term=%d, expectedChecksum=%d, realChecksum=%d",
                                         logEntry.getId().getIndex(), logEntry.getId().getTerm(), logEntry.getChecksum(),
                                         realChecksum);
@@ -1088,7 +1090,7 @@ public class NodeImpl implements INode, RaftServerService {
                 task.reset();
             }
             //落盘后调用LeaderStableClosure，给自己投一票
-            this.logManager.appendEntries(entries, new LeaderStableClosure(entries));
+            this.logManager.appendEntries(entries, new LeaderStableClosure(entries,this));
             // update conf.first
             checkAndSetConfiguration(true);
         } finally {
@@ -1319,6 +1321,23 @@ public class NodeImpl implements INode, RaftServerService {
         }
     }
 
+    @Override
+    public RaftOptions getRaftOptions() {
+        return raftOptions;
+    }
 
+
+    // called when leader receive greater term in AppendEntriesResponse
+    void increaseTermTo(final long newTerm, final Status status) {
+        this.writeLock.lock();
+        try {
+            if (newTerm < this.currTerm) {
+                return;
+            }
+            stepDown(newTerm, false, status);
+        } finally {
+            this.writeLock.unlock();
+        }
+    }
 
 }

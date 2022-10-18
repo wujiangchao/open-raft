@@ -77,4 +77,13 @@ public class ThreadId {
         }
         return this.data;
     }
+
+    public void unlock() {
+        if (!this.lock.isHeldByCurrentThread()) {
+            LOG.warn("Fail to unlock with {}, the lock is not held by current thread {}.", this.data,
+                    Thread.currentThread());
+            return;
+        }
+        this.lock.unlock();
+    }
 }
