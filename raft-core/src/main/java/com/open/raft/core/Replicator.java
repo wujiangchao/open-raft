@@ -212,6 +212,11 @@ public class Replicator  implements ThreadId.OnError {
         }
     }
 
+    /**
+     *  Leader 还需向所有 followers 主动发送心跳维持领导地位(保持存在感)
+     * 目的是让 leader 能够持续发送心跳来阻止 followers 触发选举
+     * @param id
+     */
     private static void sendHeartbeat(final ThreadId id) {
         final Replicator r = (Replicator) id.lock();
         if (r == null) {

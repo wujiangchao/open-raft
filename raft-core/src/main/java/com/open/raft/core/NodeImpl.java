@@ -625,10 +625,11 @@ public class NodeImpl implements INode, RaftServerService {
      * 校验请求的任期是否小于当前的任期，如果是那么返回一个AppendEntriesResponse类型的response
      * 调用checkStepDown方法检测当前节点的任期，以及状态，是否有leader等
      * 如果请求的serverId和当前节点的leaderId是不是同一个，用来校验是不是leader发起的请求，如果不是返回一个AppendEntriesResponse
+     *
      * 校验是否正在生成快照
      * 获取请求的Index在当前节点中对应的LogEntry的任期是不是和请求传入的任期相同，不同的话则返回AppendEntriesResponse
-     * 如果传入的entriesCount为零，那么leader发送的可能是心跳或者发送的是sendEmptyEntry，返回AppendEntriesResponse，并将当前任期和最新index封装返回
-     * 请求的数据不为空，那么遍历所有的数据
+     * 如果传入的entriesCount为零，那么leader发送的可能是心跳或者发送的是sendEmptyEntry，返回AppendEntriesResponse，
+     * 并将当前任期和最新index封装返回请求的数据不为空，那么遍历所有的数据
      * 实例化一个logEntry，并且将数据和属性设置到logEntry实例中，最后将logEntry放入到entries集合中
      * 调用logManager将数据批量提交日志写入 RocksDB
      *
