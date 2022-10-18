@@ -733,6 +733,12 @@ public class Replicator  implements ThreadId.OnError {
             id.unlock();
             return;
         }
+        //需要花点时间解释这个根据seq优先队列的用处
+        //首先要知道raft强调日志必须顺序一致的，任何并发调用onRpcReturned都可能打乱复制顺序
+        //假设现在this.reqSeq=3, requiredNextSeq=2，我们正在等待的reqSeq=2的响应由于种种原因还没到来
+        //此时某次心跳onHeartbeatReturned触发了sendEmptyEntries(false)，将reqSeq改为4，也就说seq=3，而且该探测请求很快被响应且调用该方法
+        //后来先到的response会被先hold到pendingResponses
+
         //使用优先队列按seq排序,最小的会在第一个
         final PriorityQueue<RpcResponse> holdingQueue = r.pendingResponses;
         //这里用一个优先队列是因为响应是异步的，seq小的可能响应比seq大慢

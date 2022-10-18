@@ -1117,167 +1117,6 @@ public class NodeImpl implements INode, RaftServerService {
         }
     }
 
-    /**
-     * Leader收到Follower发过来的Response响应之后会调用Replicator的onRpcReturned方法
-     * 检查版本号，因为每次resetInflights都会让version加一，所以检查一下是不是同一批的数据
-     * 获取Replicator的pendingResponses队列，然后将当前响应的数据封装成RpcResponse实例加入到队列中
-     * 校验队列里面的元素是否大于256，大于256则清空数据重新同步
-     * 校验holdingQueue队列里面的seq最小的序列数据序列和当前的requiredNextSeq是否相同，不同的话如果是刚进入循环那么直接break退出循环
-     * 获取inflights队列中第一个元素，如果seq没有对上，说明顺序乱了，重置状态
-     * 调用onAppendEntriesReturned方法处理日志复制的response
-     * 如果处理成功，那么则调用sendEntries继续发送复制日志到Followe
-     *
-     * @param id
-     * @param reqType
-     * @param status
-     * @param request
-     * @param response
-     * @param seq
-     * @param stateVersion
-     * @param rpcSendTime
-     */
-    @SuppressWarnings("ContinueOrBreakFromFinallyBlock")
-    static void onRpcReturned(final ThreadId id, final RequestType reqType, final Status status, final Message request,
-                              final Message response, final int seq, final int stateVersion, final long rpcSendTime) {
-        if (id == null) {
-            return;
-        }
-        final long startTimeMs = Utils.nowMs();
-        Replicator r;
-        if ((r = (Replicator) id.lock()) == null) {
-            return;
-        }
-        //检查版本号，因为每次resetInflights都会让version加一，所以检查一下
-        if (stateVersion != r.version) {
-            LOG.debug(
-                    "Replicator {} ignored old version response {}, current version is {}, request is {}\n, and response is {}\n, status is {}.",
-                    r, stateVersion, r.version, request, response, status);
-            id.unlock();
-            return;
-        }
-
-        //需要花点时间解释这个根据seq优先队列的用处
-        //首先要知道raft强调日志必须顺序一致的，任何并发调用onRpcReturned都可能打乱复制顺序
-        //假设现在this.reqSeq=3, requiredNextSeq=2，我们正在等待的reqSeq=2的响应由于种种原因还没到来
-        //此时某次心跳onHeartbeatReturned触发了sendEmptyEntries(false)，将reqSeq改为4，也就说seq=3，而且该探测请求很快被响应且调用该方法
-        //后来先到的response会被先hold到pendingResponses
-
-        //使用优先队列按seq排序,最小的会在第一个
-        final PriorityQueue<RpcResponse> holdingQueue = r.pendingResponses;
-        //这里用一个优先队列是因为响应是异步的，seq小的可能响应比seq大慢
-        holdingQueue.add(new RpcResponse(reqType, seq, status, request, response, rpcSendTime));
-        //默认holdingQueue队列里面的数量不能超过256
-        //某个优先级更高的请求还没被回复，需要做一次探测请求
-        if (holdingQueue.size() > r.raftOptions.getMaxReplicatorInflightMsgs()) {
-            LOG.warn("Too many pending responses {} for replicator {}, maxReplicatorInflightMsgs={}",
-                    holdingQueue.size(), r.options.getPeerId(), r.raftOptions.getMaxReplicatorInflightMsgs());
-            //重新发送探针
-            //清空数据
-            r.resetInflights();
-            r.setState(State.Probe);
-            r.sendProbeRequest();
-            return;
-        }
-
-        boolean continueSendEntries = false;
-
-        final boolean isLogDebugEnabled = LOG.isDebugEnabled();
-        StringBuilder sb = null;
-        if (isLogDebugEnabled) {
-            sb = new StringBuilder("Replicator ") //
-                    .append(r) //
-                    .append(" is processing RPC responses, ");
-        }
-        try {
-            int processed = 0;
-            while (!holdingQueue.isEmpty()) {
-                //取出holdingQueue里seq最小的数据
-                final RpcResponse queuedPipelinedResponse = holdingQueue.peek();
-                //如果Follower没有响应的话就会出现次序对不上的情况，那么就不往下走了
-                // Sequence mismatch, waiting for next response.
-                if (queuedPipelinedResponse.seq != r.requiredNextSeq) {
-                    // 如果之前存在处理，则到此直接break循环
-                    if (processed > 0) {
-                        if (isLogDebugEnabled) {
-                            sb.append("has processed ") //
-                                    .append(processed) //
-                                    .append(" responses, ");
-                        }
-                        break;
-                    } else {
-                        // Do not processed any responses, UNLOCK id and return.
-                        continueSendEntries = false;
-                        id.unlock();
-                        return;
-                    }
-                }
-                //走到这里说明seq对的上，那么就移除优先队列里面seq最小的数据
-                holdingQueue.remove();
-                processed++;
-                //获取inflights队列里的第一个元素
-                final Inflight inflight = r.pollInflight();
-                //发起一个请求的时候会将inflight放入到队列中
-                //如果为空，那么就忽略
-                if (inflight == null) {
-                    // The previous in-flight requests were cleared.
-                    if (isLogDebugEnabled) {
-                        sb.append("ignore response because request not found: ") //
-                                .append(queuedPipelinedResponse) //
-                                .append(",\n");
-                    }
-                    continue;
-                }
-
-                //seq没有对上，说明顺序乱了，重置状态
-                if (inflight.seq != queuedPipelinedResponse.seq) {
-                    // reset state
-                    LOG.warn(
-                            "Replicator {} response sequence out of order, expect {}, but it is {}, reset state to try again.",
-                            r, inflight.seq, queuedPipelinedResponse.seq);
-                    r.resetInflights();
-                    r.setState(State.Probe);
-                    continueSendEntries = false;
-                    // 锁住节点，根据错误类别等待一段时间
-                    r.block(Utils.nowMs(), RaftError.EREQUEST.getNumber());
-                    return;
-                }
-                try {
-                    switch (queuedPipelinedResponse.requestType) {
-                        case AppendEntries:                        //处理日志复制的response
-                            continueSendEntries = onAppendEntriesReturned(id, inflight, queuedPipelinedResponse.status,
-                                    (RpcRequests.AppendEntriesRequest) queuedPipelinedResponse.request,
-                                    (RpcRequests.AppendEntriesResponse) queuedPipelinedResponse.response, rpcSendTime, startTimeMs, r);
-                            break;
-                        case Snapshot:     //处理快照的response
-                            continueSendEntries = onInstallSnapshotReturned(id, r, queuedPipelinedResponse.status,
-                                    (InstallSnapshotRequest) queuedPipelinedResponse.request,
-                                    (InstallSnapshotResponse) queuedPipelinedResponse.response);
-                            break;
-                    }
-                } finally {
-                    if (continueSendEntries) {
-                        // Success, increase the response sequence.
-                        r.getAndIncrementRequiredNextSeq();
-                    } else {
-                        // The id is already unlocked in onAppendEntriesReturned/onInstallSnapshotReturned, we SHOULD break out.
-                        break;
-                    }
-                }
-            }
-        } finally {
-            if (isLogDebugEnabled) {
-                sb.append("after processed, continue to send entries: ") //
-                        .append(continueSendEntries);
-                LOG.debug(sb.toString());
-            }
-            if (continueSendEntries) {
-
-                // unlock in sendEntries.
-                r.sendEntries();
-            }
-        }
-    }
-
     private void stopVoteTimer() {
         if (this.voteTimer != null) {
             this.voteTimer.stop();
@@ -1339,5 +1178,91 @@ public class NodeImpl implements INode, RaftServerService {
             this.writeLock.unlock();
         }
     }
+
+
+    /**
+     * 如果当前的节点是个候选人（STATE_CANDIDATE），那么这个时候会让它暂时不要投票
+     * 如果当前的节点状态是（STATE_TRANSFERRING）表示正在转交leader或是leader（STATE_LEADER），
+     * 那么就需要把当前节点的stepDownTimer这个定时器给关闭
+     * 如果当前是leader（STATE_LEADER），那么就需要告诉状态机leader下台了，可以在状态机中对下台的动作做处理
+     * 重置当前节点的leader，把当前节点的state状态设置为Follower，重置confCtx上下文
+     * 停止当前的快照生成，设置新的任期，让所有的复制节点停止工作
+     * 启动electionTimer
+     * 调用stopVoteTimer和stopStepDownTimer方法里面主要是调用相应的RepeatedTimer的stop方法，
+     * 在stop方法里面会将stopped状态设置为ture，并将timeout设置为取消，并将这个timeout加入到cancelledTimeouts集合中去
+     *
+     * @param term
+     * @param wakeupCandidate
+     * @param status
+     */
+    // should be in writeLock
+    private void stepDown(final long term, final boolean wakeupCandidate, final Status status) {
+        LOG.debug("Node {} stepDown, term={}, newTerm={}, wakeupCandidate={}.", getNodeId(), this.currTerm, term,
+                wakeupCandidate);
+        if (!this.state.isActive()) {
+            return;
+        }
+        if (this.state == State.STATE_CANDIDATE) {
+            //如果是候选者，那么停止选举
+            stopVoteTimer();
+        } else if (this.state.compareTo(State.STATE_TRANSFERRING) <= 0) {
+            //如果当前状态是leader或TRANSFERRING
+            //让启动的stepDownTimer停止运作
+            stopStepDownTimer();
+            //清空选票箱中的内容
+            this.ballotBox.clearPendingTasks();
+            // signal fsm leader stop immediately
+            if (this.state == State.STATE_LEADER) {
+                //发送leader下台的事件给其他Follower
+                onLeaderStop(status);
+            }
+        }
+        // reset leader_id
+        resetLeaderId(PeerId.emptyPeer(), status);
+
+        // soft state in memory
+        this.state = State.STATE_FOLLOWER;
+        this.confCtx.reset();
+        updateLastLeaderTimestamp(Utils.monotonicMs());
+        if (this.snapshotExecutor != null) {
+            this.snapshotExecutor.interruptDownloadingSnapshots(term);
+        }
+
+        //设置任期为大的那个
+        // meta state
+        if (term > this.currTerm) {
+            this.currTerm = term;
+            this.votedId = PeerId.emptyPeer();
+            //重设元数据信息保存到文件中
+            this.metaStorage.setTermAndVotedFor(term, this.votedId);
+        }
+
+        if (wakeupCandidate) {
+            this.wakingCandidate = this.replicatorGroup.stopAllAndFindTheNextCandidate(this.conf);
+            if (this.wakingCandidate != null) {
+                Replicator.sendTimeoutNowAndStop(this.wakingCandidate, this.options.getElectionTimeoutMs());
+            }
+        } else {
+            //把replicatorGroup里面的所有replicator标记为stop
+            this.replicatorGroup.stopAll();
+        }
+
+        //leader转移的时候会用到
+        if (this.stopTransferArg != null) {
+            if (this.transferTimer != null) {
+                this.transferTimer.cancel(true);
+            }
+            // There is at most one StopTransferTimer at the same term, it's safe to
+            // mark stopTransferArg to NULL
+            this.stopTransferArg = null;
+        }
+        // Learner node will not trigger the election timer.
+        if (!isLearner()) {
+            this.electionTimer.restart();
+        } else {
+            LOG.info("Node {} is a learner, election timer is not started.", this.nodeId);
+        }
+    }
+
 
 }
