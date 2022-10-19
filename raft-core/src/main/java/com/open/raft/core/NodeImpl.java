@@ -31,6 +31,7 @@ import com.open.raft.error.RaftError;
 import com.open.raft.option.FSMCallerOptions;
 import com.open.raft.option.LogManagerOptions;
 import com.open.raft.option.NodeOptions;
+import com.open.raft.option.RaftMetaStorageOptions;
 import com.open.raft.option.RaftOptions;
 import com.open.raft.option.ReplicatorGroupOptions;
 import com.open.raft.rpc.RaftClientService;
@@ -41,6 +42,7 @@ import com.open.raft.rpc.RpcResponseClosure;
 import com.open.raft.rpc.impl.core.DefaultRaftClientService;
 import com.open.raft.storage.LogManager;
 import com.open.raft.storage.LogStorage;
+import com.open.raft.storage.RaftMetaStorage;
 import com.open.raft.storage.impl.LogManagerImpl;
 import com.open.raft.util.RepeatedTimer;
 import com.open.raft.util.Requires;
@@ -95,6 +97,7 @@ public class NodeImpl implements INode, RaftServerService {
     private RaftServiceFactory serviceFactory;
 
     private PeerId leaderId = new PeerId();
+    private PeerId votedId;
 
     /**
      * Node's target leader election priority value
@@ -118,6 +121,7 @@ public class NodeImpl implements INode, RaftServerService {
     private FSMCaller fsmCaller;
     private LogManager logManager;
     private LogStorage logStorage;
+    private RaftMetaStorage metaStorage;
     private ClosureQueue closureQueue;
     private BallotBox ballotBox;
     private ReplicatorGroup replicatorGroup;
@@ -1262,6 +1266,19 @@ public class NodeImpl implements INode, RaftServerService {
         } else {
             LOG.info("Node {} is a learner, election timer is not started.", this.nodeId);
         }
+    }
+
+    private boolean initMetaStorage() {
+        this.metaStorage = this.serviceFactory.createRaftMetaStorage(this.options.getRaftMetaUri(), this.raftOptions);
+        RaftMetaStorageOptions opts = new RaftMetaStorageOptions();
+        opts.setNode(this);
+        if (!this.metaStorage.init(opts)) {
+            LOG.error("Node {} init meta storage failed, uri={}.", this.serverId, this.options.getRaftMetaUri());
+            return false;
+        }
+        this.currTerm = this.metaStorage.getTerm();
+        this.votedId = this.metaStorage.getVotedFor().copy();
+        return true;
     }
 
 

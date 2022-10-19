@@ -154,6 +154,7 @@ public class BallotBox implements Lifecycle<BallotBoxOptions> {
      *
      * 在新的任期不能提交上个任期没有提交的日志
      * https://zhuanlan.zhihu.com/p/517969401
+     * https://www.modb.pro/db/150555
      * @param newPendingIndex pending index of new leader
      * @return returns true if reset success
      */
