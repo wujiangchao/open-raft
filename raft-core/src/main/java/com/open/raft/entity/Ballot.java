@@ -10,9 +10,6 @@ import java.util.List;
 /**
  * A ballot to vote.
  *
- * @author boyan (boyan@alibaba-inc.com)
- * <p>
- * 2018-Mar-15 2:29:11 PM
  */
 public class Ballot {
 

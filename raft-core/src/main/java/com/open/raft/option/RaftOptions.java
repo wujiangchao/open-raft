@@ -25,6 +25,20 @@ public class RaftOptions implements Copiable<RaftOptions> {
      */
     private int maxReplicatorInflightMsgs = 256;
 
+    /**
+     * Internal disruptor buffers size for Node/FSMCaller/LogManager etc.
+     */
+    private int disruptorBufferSize = 16384;
+
+    /**
+     * When true, validate log entry checksum when transferring the log entry from disk or network, default is false.
+     * If true, it would hurt the performance of JRAft but gain the data safety.
+     *
+     */
+    private boolean enableLogEntryChecksum = false;
+
+
+
     @Override
     public RaftOptions copy() {
         return null;
@@ -52,5 +66,21 @@ public class RaftOptions implements Copiable<RaftOptions> {
 
     public void setMaxReplicatorInflightMsgs(int maxReplicatorInflightMsgs) {
         this.maxReplicatorInflightMsgs = maxReplicatorInflightMsgs;
+    }
+
+    public int getDisruptorBufferSize() {
+        return disruptorBufferSize;
+    }
+
+    public void setDisruptorBufferSize(int disruptorBufferSize) {
+        this.disruptorBufferSize = disruptorBufferSize;
+    }
+
+    public boolean isEnableLogEntryChecksum() {
+        return enableLogEntryChecksum;
+    }
+
+    public void setEnableLogEntryChecksum(boolean enableLogEntryChecksum) {
+        this.enableLogEntryChecksum = enableLogEntryChecksum;
     }
 }

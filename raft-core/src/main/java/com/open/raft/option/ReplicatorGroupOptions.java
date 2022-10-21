@@ -17,7 +17,9 @@ public class ReplicatorGroupOptions {
     private int               electionTimeoutMs;
     private LogManager logManager;
     private BallotBox         ballotBox;
-    //当前结点
+    /**
+     *  当前结点
+     */
     private NodeImpl node;
     private SnapshotStorage   snapshotStorage;
     private RaftClientService raftRpcClientService;

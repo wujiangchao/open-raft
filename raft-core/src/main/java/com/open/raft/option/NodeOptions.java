@@ -1,6 +1,7 @@
 package com.open.raft.option;
 
 
+import com.open.raft.JRaftServiceFactory;
 import com.open.raft.RaftServiceFactory;
 import com.open.raft.StateMachine;
 import com.open.raft.core.ElectionPriority;
@@ -16,7 +17,7 @@ import com.open.raft.util.Utils;
 public class NodeOptions extends RpcOptions implements Copiable<NodeOptions> {
 
 
-    public static final RaftServiceFactory defaultServiceFactory = RaftServiceLoader.load(RaftServiceFactory.class)
+    public static final JRaftServiceFactory defaultServiceFactory = RaftServiceLoader.load(JRaftServiceFactory.class)
             .first();
 
     /**
@@ -184,15 +185,15 @@ public class NodeOptions extends RpcOptions implements Copiable<NodeOptions> {
      */
     private int decayPriorityGap = 10;
 
-    public RaftServiceFactory getServiceFactory() {
+    public JRaftServiceFactory getServiceFactory() {
         return serviceFactory;
     }
 
-    public void setServiceFactory(RaftServiceFactory serviceFactory) {
+    public void setServiceFactory(JRaftServiceFactory serviceFactory) {
         this.serviceFactory = serviceFactory;
     }
 
-    private RaftServiceFactory serviceFactory = defaultServiceFactory;
+    private JRaftServiceFactory serviceFactory = defaultServiceFactory;
 
 
     public RaftOptions getRaftOptions() {

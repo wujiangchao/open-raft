@@ -7,17 +7,19 @@ import com.lmax.disruptor.dsl.Disruptor;
 import com.open.raft.Closure;
 import com.open.raft.FSMCaller;
 import com.open.raft.INode;
-import com.open.raft.RaftServiceFactory;
+import com.open.raft.JRaftServiceFactory;
 import com.open.raft.Status;
 import com.open.raft.closure.ClosureQueue;
 import com.open.raft.closure.ClosureQueueImpl;
 import com.open.raft.closure.LeaderStableClosure;
 import com.open.raft.conf.Configuration;
 import com.open.raft.conf.ConfigurationEntry;
+import com.open.raft.conf.ConfigurationManager;
 import com.open.raft.core.done.ConfigurationChangeDone;
 import com.open.raft.core.done.OnPreVoteRpcDone;
 import com.open.raft.core.done.OnRequestVoteRpcDone;
 import com.open.raft.core.event.LogEntryEvent;
+import com.open.raft.entity.Ballot;
 import com.open.raft.entity.EnumOutter;
 import com.open.raft.entity.LeaderChangeContext;
 import com.open.raft.entity.LogEntry;
@@ -44,6 +46,7 @@ import com.open.raft.storage.LogManager;
 import com.open.raft.storage.LogStorage;
 import com.open.raft.storage.RaftMetaStorage;
 import com.open.raft.storage.impl.LogManagerImpl;
+import com.open.raft.storage.snapshot.SnapshotExecutor;
 import com.open.raft.util.RepeatedTimer;
 import com.open.raft.util.Requires;
 import com.open.raft.util.ThreadId;
@@ -94,8 +97,7 @@ public class NodeImpl implements INode, RaftServerService {
     private final PeerId serverId;
 
     private NodeId nodeId;
-    private RaftServiceFactory serviceFactory;
-
+    private JRaftServiceFactory serviceFactory;
     private PeerId leaderId = new PeerId();
     private PeerId votedId;
 
@@ -119,7 +121,9 @@ public class NodeImpl implements INode, RaftServerService {
 
 
     private FSMCaller fsmCaller;
+    private SnapshotExecutor snapshotExecutor;
     private LogManager logManager;
+    private ConfigurationManager configManager;
     private LogStorage logStorage;
     private RaftMetaStorage metaStorage;
     private ClosureQueue closureQueue;
@@ -145,6 +149,14 @@ public class NodeImpl implements INode, RaftServerService {
 
     public static final AtomicInteger GLOBAL_NUM_NODES = new AtomicInteger(
             0);
+
+    private final Ballot voteCtx = new Ballot();
+    private final Ballot prevVoteCtx = new Ballot();
+
+    /**
+     * Metrics
+     */
+    private NodeMetrics metrics;
 
     public NodeImpl(String groupId, PeerId serverId) {
         this.groupId = groupId;
@@ -193,7 +205,6 @@ public class NodeImpl implements INode, RaftServerService {
             return false;
         }
 
-
         // TODO RPC service and ReplicatorGroup is in cycle dependent, refactor it
         this.replicatorGroup = new ReplicatorGroupImpl();
         //收其他节点或者客户端发过来的请求，转交给对应服务处理
@@ -207,9 +218,8 @@ public class NodeImpl implements INode, RaftServerService {
         rgOpts.setRaftRpcClientService(this.rpcService);
         rgOpts.setSnapshotStorage(this.snapshotExecutor != null ? this.snapshotExecutor.getSnapshotStorage() : null);
         rgOpts.setRaftOptions(this.raftOptions);
+        //用来调度heartbeat
         rgOpts.setTimerManager(this.timerManager);
-
-
         this.replicatorGroup.init(new NodeId(this.groupId, this.serverId), rgOpts);
 
         return false;
@@ -249,6 +259,28 @@ public class NodeImpl implements INode, RaftServerService {
         opts.setDisruptorBufferSize(this.raftOptions.getDisruptorBufferSize());
         return this.fsmCaller.init(opts);
     }
+
+    private void afterShutdown() {
+        List<Closure> savedDoneList = null;
+        this.writeLock.lock();
+        try {
+            if (!this.shutdownContinuations.isEmpty()) {
+                savedDoneList = new ArrayList<>(this.shutdownContinuations);
+            }
+            if (this.logStorage != null) {
+                this.logStorage.shutdown();
+            }
+            this.state = State.STATE_SHUTDOWN;
+        } finally {
+            this.writeLock.unlock();
+        }
+        if (savedDoneList != null) {
+            for (final Closure closure : savedDoneList) {
+                Utils.runClosureInThread(closure);
+            }
+        }
+    }
+
 
     /**
      * the handler of electionTimeout,called by electionTimeoutTimer
@@ -386,8 +418,95 @@ public class NodeImpl implements INode, RaftServerService {
 
     @Override
     public void shutdown() {
-
+        shutdown(null);
     }
+
+    @Override
+    public void shutdown(Closure done) {
+        List<RepeatedTimer> timers = null;
+        this.writeLock.lock();
+        try {
+            LOG.info("Node {} shutdown, currTerm={} state={}.", getNodeId(), this.currTerm, this.state);
+            if (this.state.compareTo(State.STATE_SHUTTING) < 0) {
+                NodeManager.getInstance().remove(this);
+                // If it is leader, set the wakeup_a_candidate with true;
+                // If it is follower, call on_stop_following in step_down
+                if (this.state.compareTo(State.STATE_FOLLOWER) <= 0) {
+                    stepDown(this.currTerm, this.state == State.STATE_LEADER,
+                            new Status(RaftError.ESHUTDOWN, "Raft node is going to quit."));
+                }
+                this.state = State.STATE_SHUTTING;
+                // Stop all timers
+                timers = stopAllTimers();
+                if (this.readOnlyService != null) {
+                    this.readOnlyService.shutdown();
+                }
+                if (this.logManager != null) {
+                    this.logManager.shutdown();
+                }
+                if (this.metaStorage != null) {
+                    this.metaStorage.shutdown();
+                }
+                if (this.snapshotExecutor != null) {
+                    this.snapshotExecutor.shutdown();
+                }
+                if (this.wakingCandidate != null) {
+                    Replicator.stop(this.wakingCandidate);
+                }
+                if (this.fsmCaller != null) {
+                    this.fsmCaller.shutdown();
+                }
+                if (this.rpcService != null) {
+                    this.rpcService.shutdown();
+                }
+                if (this.applyQueue != null) {
+                    final CountDownLatch latch = new CountDownLatch(1);
+                    this.shutdownLatch = latch;
+                    Utils.runInThread(
+                            () -> this.applyQueue.publishEvent((event, sequence) -> event.shutdownLatch = latch));
+                } else {
+                    final int num = GLOBAL_NUM_NODES.decrementAndGet();
+                    LOG.info("The number of active nodes decrement to {}.", num);
+                }
+                if (this.timerManager != null) {
+                    this.timerManager.shutdown();
+                }
+            }
+
+            if (this.state != State.STATE_SHUTDOWN) {
+                if (done != null) {
+                    this.shutdownContinuations.add(done);
+                    done = null;
+                }
+                return;
+            }
+        } finally {
+            this.writeLock.unlock();
+
+            // Destroy all timers out of lock
+            if (timers != null) {
+                destroyAllTimers(timers);
+            }
+            // Call join() asynchronously
+            final Closure shutdownHook = done;
+            Utils.runInThread(() -> {
+                try {
+                    join();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } finally {
+                    // This node is down, it's ok to invoke done right now. Don't invoke this
+                    // in place to avoid the dead writeLock issue when done.Run() is going to acquire
+                    // a writeLock which is already held by the caller
+                    if (shutdownHook != null) {
+                        shutdownHook.run(Status.OK());
+                    }
+                }
+            });
+
+        }
+    }
+
 
     @Override
     public PeerId getLeaderId() {
@@ -1061,6 +1180,7 @@ public class NodeImpl implements INode, RaftServerService {
                 Utils.runInThread(() -> {
                     for (final Closure done : dones) {
                         // Closure.run(错误状态）返回
+                        // 以counter的例子来说 done就是 CounterClosure
                         done.run(st);
                     }
                 });
@@ -1081,6 +1201,7 @@ public class NodeImpl implements INode, RaftServerService {
                     }
                     continue;
                 }
+
                 if (!this.ballotBox.appendPendingTask(this.conf.getConf(),
                         this.conf.isStable() ? null : this.conf.getOldConf(), task.done)) {
                     Utils.runClosureInThread(task.done, new Status(RaftError.EINTERNAL, "Fail to append task."));

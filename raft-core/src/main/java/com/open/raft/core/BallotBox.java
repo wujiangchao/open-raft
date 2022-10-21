@@ -34,6 +34,9 @@ public class BallotBox implements Lifecycle<BallotBoxOptions> {
      */
     private StampedLock stampedLock = new StampedLock();
     private FSMCaller waiter;
+    /**
+     * 存放的是task.done
+     */
     private ClosureQueue closureQueue;
     private final SegmentList<Ballot> pendingMetaQueue = new SegmentList<>(false);
 
@@ -76,6 +79,7 @@ public class BallotBox implements Lifecycle<BallotBoxOptions> {
                 LOG.error("Fail to appendingTask, pendingIndex={}.", this.pendingIndex);
                 return false;
             }
+
             this.pendingMetaQueue.add(bl);
             this.closureQueue.appendPendingClosure(done);
             return true;
@@ -151,10 +155,11 @@ public class BallotBox implements Lifecycle<BallotBoxOptions> {
      * According the the raft algorithm, the logs from previous terms can't be
      * committed until a log at the new term becomes committed, so
      * |newPendingIndex| should be |last_log_index| + 1.
-     *
+     * <p>
      * 在新的任期不能提交上个任期没有提交的日志
      * https://zhuanlan.zhihu.com/p/517969401
      * https://www.modb.pro/db/150555
+     *
      * @param newPendingIndex pending index of new leader
      * @return returns true if reset success
      */

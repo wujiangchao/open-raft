@@ -60,6 +60,11 @@ public enum RaftError {
      */
     EHIGHERTERMRESPONSE(10008),
 
+    /**
+     * IO error
+     */
+    EIO(1014),
+
 
     /**
      * All Kinds of Timeout(Including Election_timeout, Timeout_now, Stepdown_timeout)

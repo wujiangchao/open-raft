@@ -29,6 +29,7 @@ public class LogEntryEventHandler implements EventHandler<LogEntryEvent> {
     @Override
     public void onEvent(final LogEntryEvent event, final long sequence, final boolean endOfBatch)
             throws Exception {
+        // node.shutdown
         if (event.shutdownLatch != null) {
             if (!this.tasks.isEmpty()) {
                 node.executeApplyingTasks(this.tasks);

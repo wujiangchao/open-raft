@@ -18,6 +18,7 @@ import com.open.raft.rpc.RpcRequests;
 import com.open.raft.rpc.RpcResponseClosure;
 import com.open.raft.rpc.RpcResponseClosureAdapter;
 import com.open.raft.rpc.RpcUtils;
+import com.open.raft.storage.snapshot.SnapshotReader;
 import com.open.raft.util.Requires;
 import com.open.raft.util.ThreadId;
 import com.open.raft.util.Utils;
@@ -42,7 +43,7 @@ public class Replicator  implements ThreadId.OnError {
     private static final Logger LOG = LoggerFactory.getLogger(Replicator.class);
     private final RaftClientService rpcService;
 
-    // Next sending log index
+    // Next sending log index  下一个要发送的LogIndexId，Leader上任初始化为lastLogIndex + 1
     private volatile long nextIndex;
 
     private final ReplicatorOptions options;
@@ -62,7 +63,8 @@ public class Replicator  implements ThreadId.OnError {
     private CatchUpClosure catchUpClosure;
     private final Scheduler timerManager;
 
-    // Cached the latest RPC in-flight request.
+    // 每次日志复制都把多个LogEntity封装进Inflight，一次发送
+    // Cached the latest RPC in-flight request.这里记录最近要的一个
     private Inflight rpcInFly;
     // Heartbeat RPC future
     private Future<Message> heartbeatInFly;
@@ -73,6 +75,7 @@ public class Replicator  implements ThreadId.OnError {
 
     protected Stat statInfo = new Stat();
 
+    //Raft不允许乱序日志复制，所以需要这两个字段限制某个inflight是否对应某个request和response
     // Request sequence
     private int reqSeq = 0;
     // Response sequence
