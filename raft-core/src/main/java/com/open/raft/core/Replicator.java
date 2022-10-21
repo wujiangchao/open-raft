@@ -11,6 +11,7 @@ import com.open.raft.entity.EnumOutter;
 import com.open.raft.entity.PeerId;
 import com.open.raft.entity.RaftOutter;
 import com.open.raft.error.RaftError;
+import com.open.raft.error.RaftException;
 import com.open.raft.option.RaftOptions;
 import com.open.raft.option.ReplicatorOptions;
 import com.open.raft.rpc.RaftClientService;
@@ -26,11 +27,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.annotation.concurrent.ThreadSafe;
+import java.nio.ByteBuffer;
 import java.util.ArrayDeque;
 import java.util.PriorityQueue;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+
+import static com.codahale.metrics.MetricRegistry.name;
 
 /**
  * @Description  Replicator for replicating log entry from leader to followers.
@@ -856,6 +860,146 @@ public class Replicator  implements ThreadId.OnError {
         }
     }
 
+    /**
+     * Send as many requests as possible.
+     */
+    void sendEntries() {
+        boolean doUnlock = true;
+        try {
+            long prevSendIndex = -1;
+            while (true) {
+                final long nextSendingIndex = getNextSendIndex();
+                if (nextSendingIndex > prevSendIndex) {
+                    if (sendEntries(nextSendingIndex)) {
+                        prevSendIndex = nextSendingIndex;
+                    } else {
+                        doUnlock = false;
+                        // id already unlock in sendEntries when it returns false.
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+        } finally {
+            if (doUnlock) {
+                unlockId();
+            }
+        }
+    }
+
+    /**
+     * Send log entries to follower, returns true when success, otherwise false and unlock the id.
+     *
+     * @param nextSendingIndex next sending index
+     * @return send result.
+     */
+    private boolean sendEntries(final long nextSendingIndex) {
+        final RpcRequests.AppendEntriesRequest.Builder rb = RpcRequests.AppendEntriesRequest.newBuilder();
+        //填写当前Replicator的配置信息到rb中
+        if (!fillCommonFields(rb, nextSendingIndex - 1, false)) {
+            // unlock id in installSnapshot
+            installSnapshot();
+            return false;
+        }
+
+        ByteBufferCollector dataBuf = null;
+        final int maxEntriesSize = this.raftOptions.getMaxEntriesSize();
+        //这里使用了类似对象池的技术，避免重复创建对象
+        final RecyclableByteBufferList byteBufList = RecyclableByteBufferList.newInstance();
+        try {
+            //循环遍历出所有的logEntry封装到byteBufList和emb中
+            for (int i = 0; i < maxEntriesSize; i++) {
+                final RaftOutter.EntryMeta.Builder emb = RaftOutter.EntryMeta.newBuilder();
+                //nextSendingIndex代表下一个要发送的index，i代表偏移量
+                if (!prepareEntry(nextSendingIndex, i, emb, byteBufList)) {
+                    break;
+                }
+                rb.addEntries(emb.build());
+            }
+            //如果EntriesCount为0的话，说明LogManager里暂时没有新数据
+            if (rb.getEntriesCount() == 0) {
+                if (nextSendingIndex < this.options.getLogManager().getFirstLogIndex()) {
+                    installSnapshot();
+                    return false;
+                }
+                // _id is unlock in _wait_more
+                waitMoreEntries(nextSendingIndex);
+                return false;
+            }
+
+            //将byteBufList里面的数据放入到rb中
+            if (byteBufList.getCapacity() > 0) {
+                dataBuf = ByteBufferCollector.allocateByRecyclers(byteBufList.getCapacity());
+                for (final ByteBuffer b : byteBufList) {
+                    dataBuf.put(b);
+                }
+                final ByteBuffer buf = dataBuf.getBuffer();
+                buf.flip();
+                rb.setData(ZeroByteStringHelper.wrap(buf));
+            }
+        } finally {
+            //回收一下byteBufList
+            RecycleUtil.recycle(byteBufList);
+        }
+
+        final RpcRequests.AppendEntriesRequest request = rb.build();
+        if (LOG.isDebugEnabled()) {
+            LOG.debug(
+                    "Node {} send AppendEntriesRequest to {} term {} lastCommittedIndex {} prevLogIndex {} prevLogTerm {} logIndex {} count {}",
+                    this.options.getNode().getNodeId(), this.options.getPeerId(), this.options.getTerm(),
+                    request.getCommittedIndex(), request.getPrevLogIndex(), request.getPrevLogTerm(), nextSendingIndex,
+                    request.getEntriesCount());
+        }
+        this.statInfo.runningState = RunningState.APPENDING_ENTRIES;
+        this.statInfo.firstLogIndex = rb.getPrevLogIndex() + 1;
+        this.statInfo.lastLogIndex = rb.getPrevLogIndex() + rb.getEntriesCount();
+
+        final Recyclable recyclable = dataBuf;
+        final int v = this.version;
+        final long monotonicSendTimeMs = Utils.monotonicMs();
+        final int seq = getAndIncrementReqSeq();
+
+        this.appendEntriesCounter++;
+        Future<Message> rpcFuture = null;
+        try {
+            rpcFuture = this.rpcService.appendEntries(this.options.getPeerId().getEndpoint(), request, -1,
+                    new RpcResponseClosureAdapter<RpcRequests.AppendEntriesResponse>() {
+
+                        @Override
+                        public void run(final Status status) {
+                            //回收资源
+                            RecycleUtil.recycle(recyclable); // TODO: recycle on send success, not response received.
+                            onRpcReturned(Replicator.this.id, RequestType.AppendEntries, status, request, getResponse(),
+                                    seq, v, monotonicSendTimeMs);
+                        }
+                    });
+        } catch (final Throwable t) {
+            RecycleUtil.recycle(recyclable);
+            ThrowUtil.throwException(t);
+        }
+        //添加Inflight
+        addInflight(RequestType.AppendEntries, nextSendingIndex, request.getEntriesCount(), request.getData().size(),
+                seq, rpcFuture);
+        return true;
+    }
+
+
+    /**
+     * Adds a in-flight request
+     *
+     * @param reqType type of request
+     * @param count   count if request
+     * @param size    size in bytes
+     */
+    private void addInflight(final RequestType reqType, final long startIndex, final int count, final int size,
+                             final int seq, final Future<Message> rpcInfly) {
+        this.rpcInFly = new Inflight(reqType, startIndex, count, size, seq, rpcInfly);
+        this.inflights.add(this.rpcInFly);
+        this.nodeMetrics.recordSize(name(this.metricName, "replicate-inflights-count"), this.inflights.size());
+    }
+
+
 
     // In-flight request type
     enum RequestType {
@@ -1130,6 +1274,7 @@ public class Replicator  implements ThreadId.OnError {
         if (entriesSize > 0) {
             if (r.options.getReplicatorType().isFollower()) {
                 // Only commit index when the response is from follower.
+                // append log 后投票
                 r.options.getBallotBox().commitAt(r.nextIndex, r.nextIndex + entriesSize - 1, r.options.getPeerId());
             }
             if (LOG.isDebugEnabled()) {

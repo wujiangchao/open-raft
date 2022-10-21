@@ -1,6 +1,7 @@
 package com.open.raft;
 
 import com.open.raft.entity.LeaderChangeContext;
+import com.open.raft.error.RaftException;
 import com.open.raft.option.FSMCallerOptions;
 
 /**
@@ -23,5 +24,12 @@ public interface FSMCaller extends Lifecycle<FSMCallerOptions>{
      * @param committedIndex committed log index
      */
     boolean onCommitted(final long committedIndex);
+
+    /**
+     * Called when error happens.
+     *
+     * @param error error info
+     */
+    boolean onError(final RaftException error);
 
 }

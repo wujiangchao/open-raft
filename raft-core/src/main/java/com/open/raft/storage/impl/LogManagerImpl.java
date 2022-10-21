@@ -7,6 +7,7 @@ import com.lmax.disruptor.RingBuffer;
 import com.lmax.disruptor.TimeoutBlockingWaitStrategy;
 import com.lmax.disruptor.dsl.Disruptor;
 import com.lmax.disruptor.dsl.ProducerType;
+import com.open.raft.FSMCaller;
 import com.open.raft.Status;
 import com.open.raft.conf.Configuration;
 import com.open.raft.conf.ConfigurationEntry;
@@ -16,6 +17,7 @@ import com.open.raft.entity.EnumOutter;
 import com.open.raft.entity.LogEntry;
 import com.open.raft.entity.LogId;
 import com.open.raft.error.RaftError;
+import com.open.raft.error.RaftException;
 import com.open.raft.option.LogManagerOptions;
 import com.open.raft.option.LogStorageOptions;
 import com.open.raft.option.RaftOptions;
@@ -62,6 +64,8 @@ public class LogManagerImpl implements LogManager {
     private NodeMetrics nodeMetrics;
     private LogId diskId = new LogId(0, 0);
     private final SegmentList<LogEntry> logsInMemory = new SegmentList<>(true);
+    private FSMCaller fsmCaller;
+
 
     private enum EventType {
         OTHER, // other event type.
@@ -255,6 +259,7 @@ public class LogManagerImpl implements LogManager {
                         } else {
                             st = Status.OK();
                         }
+                        //本地保存成功 commitAt 一下
                         this.storage.get(i).run(st);
                     } catch (Throwable t) {
                         LOG.error("Fail to run closure with status: {}.", st, t);
@@ -496,5 +501,69 @@ public class LogManagerImpl implements LogManager {
             return entry.getId().getTerm();
         }
         return 0;
+    }
+
+    /**
+     * 保存到本地
+     *
+     * @param toAppend
+     * @return
+     */
+    private LogId appendToStorage(final List<LogEntry> toAppend) {
+        LogId lastId = null;
+        if (!this.hasError) {
+            final long startMs = Utils.monotonicMs();
+            final int entriesCount = toAppend.size();
+            this.nodeMetrics.recordSize("append-logs-count", entriesCount);
+            try {
+                int writtenSize = 0;
+                for (int i = 0; i < entriesCount; i++) {
+                    final LogEntry entry = toAppend.get(i);
+                    writtenSize += entry.getData() != null ? entry.getData().remaining() : 0;
+                }
+                this.nodeMetrics.recordSize("append-logs-bytes", writtenSize);
+                final int nAppent = this.logStorage.appendEntries(toAppend);
+                if (nAppent != entriesCount) {
+                    LOG.error("**Critical error**, fail to appendEntries, nAppent={}, toAppend={}", nAppent,
+                            toAppend.size());
+                    reportError(RaftError.EIO.getNumber(), "Fail to append log entries");
+                }
+                if (nAppent > 0) {
+                    lastId = toAppend.get(nAppent - 1).getId();
+                }
+                toAppend.clear();
+            } finally {
+                this.nodeMetrics.recordLatency("append-logs", Utils.monotonicMs() - startMs);
+            }
+        }
+        return lastId;
+    }
+
+    private void reportError(final int code, final String fmt, final Object... args) {
+        this.hasError = true;
+        final RaftException error = new RaftException(EnumOutter.ErrorType.ERROR_TYPE_LOG);
+        error.setStatus(new Status(code, fmt, args));
+        this.fsmCaller.onError(error);
+    }
+
+
+    private void setDiskId(final LogId id) {
+        if (id == null) {
+            return;
+        }
+        LogId clearId;
+        this.writeLock.lock();
+        try {
+            if (id.compareTo(this.diskId) < 0) {
+                return;
+            }
+            this.diskId = id;
+            clearId = this.diskId.compareTo(this.appliedId) <= 0 ? this.diskId : this.appliedId;
+        } finally {
+            this.writeLock.unlock();
+        }
+        if (clearId != null) {
+            clearMemoryLogs(clearId);
+        }
     }
 }
