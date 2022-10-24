@@ -12,6 +12,7 @@ import com.open.raft.Status;
 import com.open.raft.closure.ClosureQueue;
 import com.open.raft.closure.ClosureQueueImpl;
 import com.open.raft.closure.LeaderStableClosure;
+import com.open.raft.closure.ReadIndexClosure;
 import com.open.raft.conf.Configuration;
 import com.open.raft.conf.ConfigurationEntry;
 import com.open.raft.conf.ConfigurationManager;
@@ -1288,6 +1289,15 @@ public class NodeImpl implements INode, RaftServerService {
     @Override
     public RaftOptions getRaftOptions() {
         return raftOptions;
+    }
+
+    @Override
+    public void readIndex(byte[] requestContext, ReadIndexClosure done) {
+        if (this.shutdownLatch != null) {
+            Utils.runClosureInThread(done, new Status(RaftError.ENODESHUTDOWN, "Node is shutting down."));
+            throw new IllegalStateException("Node is shutting down");
+        }
+        Requires.requireNonNull(done, "Null closure");
     }
 
 

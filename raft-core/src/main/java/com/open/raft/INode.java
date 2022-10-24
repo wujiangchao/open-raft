@@ -55,4 +55,20 @@ public interface INode extends Lifecycle<NodeOptions> {
      */
     RaftOptions getRaftOptions();
 
+    /**
+     * [Thread-safe and wait-free]
+     *
+     * Starts a linearizable read-only query request with request context(optional,
+     * such as request id etc.) and closure.  The closure will be called when the
+     * request is completed, and user can read data from state machine if the result
+     * status is OK.
+     *
+     * @param requestContext the context of request
+     * @param done           callback
+     *
+     * @since 0.0.3
+     */
+    void readIndex(final byte[] requestContext, final ReadIndexClosure done);
+
+
 }
