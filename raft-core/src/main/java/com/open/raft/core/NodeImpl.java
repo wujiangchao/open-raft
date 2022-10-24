@@ -8,6 +8,7 @@ import com.open.raft.Closure;
 import com.open.raft.FSMCaller;
 import com.open.raft.INode;
 import com.open.raft.JRaftServiceFactory;
+import com.open.raft.ReadOnlyService;
 import com.open.raft.Status;
 import com.open.raft.closure.ClosureQueue;
 import com.open.raft.closure.ClosureQueueImpl;
@@ -36,6 +37,7 @@ import com.open.raft.option.LogManagerOptions;
 import com.open.raft.option.NodeOptions;
 import com.open.raft.option.RaftMetaStorageOptions;
 import com.open.raft.option.RaftOptions;
+import com.open.raft.option.ReadOnlyServiceOptions;
 import com.open.raft.option.ReplicatorGroupOptions;
 import com.open.raft.rpc.RaftClientService;
 import com.open.raft.rpc.RaftServerService;
@@ -132,6 +134,8 @@ public class NodeImpl implements INode, RaftServerService {
     private ReplicatorGroup replicatorGroup;
     private RaftClientService rpcService;
     private final ConfigurationCtx confCtx;
+    private ReadOnlyService readOnlyService;
+
 
     /**
      * Timers
@@ -222,6 +226,19 @@ public class NodeImpl implements INode, RaftServerService {
         //用来调度heartbeat
         rgOpts.setTimerManager(this.timerManager);
         this.replicatorGroup.init(new NodeId(this.groupId, this.serverId), rgOpts);
+
+        //只读服务，包括readindex也是在这里被调用
+        this.readOnlyService = new ReadOnlyServiceImpl();
+        final ReadOnlyServiceOptions rosOpts = new ReadOnlyServiceOptions();
+        rosOpts.setFsmCaller(this.fsmCaller);
+        rosOpts.setNode(this);
+        rosOpts.setRaftOptions(this.raftOptions);
+
+        //只读服务初始化
+        if (!this.readOnlyService.init(rosOpts)) {
+            LOG.error("Fail to init readOnlyService.");
+            return false;
+        }
 
         return false;
     }
@@ -955,22 +972,101 @@ public class NodeImpl implements INode, RaftServerService {
 
     @Override
     public void handleReadIndexRequest(RpcRequests.ReadIndexRequest request, RpcResponseClosure<RpcRequests.ReadIndexResponse> done) {
-
+        final long startMs = Utils.monotonicMs();
+        this.readLock.lock();
+        try {
+            switch (this.state) {
+                case STATE_LEADER:
+                    readLeader(request, RpcRequests.ReadIndexResponse.newBuilder(), done);
+                    break;
+                case STATE_FOLLOWER:
+                    readFollower(request, done);
+                    break;
+                case STATE_TRANSFERRING:
+                    done.run(new Status(RaftError.EBUSY, "Is transferring leadership."));
+                    break;
+                default:
+                    done.run(new Status(RaftError.EPERM, "Invalid state for readIndex: %s.", this.state));
+                    break;
+            }
+        } finally {
+            this.readLock.unlock();
+            this.metrics.recordLatency("handle-read-index", Utils.monotonicMs() - startMs);
+            this.metrics.recordSize("handle-read-index-entries", request.getEntriesCount());
+        }
     }
 
-    @Override
-    public Message handleInstallSnapshot(RpcRequests.InstallSnapshotRequest request, RpcRequestClosure done) {
-        return null;
+    private void readLeader(final RpcRequests.ReadIndexRequest request, final RpcRequests.ReadIndexResponse.Builder respBuilder,
+                            final RpcResponseClosure<RpcRequests.ReadIndexResponse> closure) {
+        final int quorum = getQuorum();
+        if (quorum <= 1) {
+            // Only one peer, fast path.
+            respBuilder.setSuccess(true) //
+                    .setIndex(this.ballotBox.getLastCommittedIndex());
+            closure.setResponse(respBuilder.build());
+            closure.run(Status.OK());
+            return;
+        }
+
+        final long lastCommittedIndex = this.ballotBox.getLastCommittedIndex();
+        if (this.logManager.getTerm(lastCommittedIndex) != this.currTerm) {
+            // Reject read only request when this leader has not committed any log entry at its term
+            closure
+                    .run(new Status(
+                            RaftError.EAGAIN,
+                            "ReadIndex request rejected because leader has not committed any log entry at its term, logIndex=%d, currTerm=%d.",
+                            lastCommittedIndex, this.currTerm));
+            return;
+        }
+        respBuilder.setIndex(lastCommittedIndex);
+
+        if (request.getPeerId() != null) {
+            // request from follower or learner, check if the follower/learner is in current conf.
+            final PeerId peer = new PeerId();
+            peer.parse(request.getServerId());
+            if (!this.conf.contains(peer) && !this.conf.containsLearner(peer)) {
+                closure
+                        .run(new Status(RaftError.EPERM, "Peer %s is not in current configuration: %s.", peer, this.conf));
+                return;
+            }
+        }
+
+        ReadOnlyOption readOnlyOpt = this.raftOptions.getReadOnlyOptions();
+        if (readOnlyOpt == ReadOnlyOption.ReadOnlyLeaseBased && !isLeaderLeaseValid()) {
+            // If leader lease timeout, we must change option to ReadOnlySafe
+            readOnlyOpt = ReadOnlyOption.ReadOnlySafe;
+        }
+
+        switch (readOnlyOpt) {
+            case ReadOnlySafe:
+                final List<PeerId> peers = this.conf.getConf().getPeers();
+                Requires.requireTrue(peers != null && !peers.isEmpty(), "Empty peers");
+                final ReadIndexHeartbeatResponseClosure heartbeatDone = new ReadIndexHeartbeatResponseClosure(closure,
+                        respBuilder, quorum, peers.size());
+                // Send heartbeat requests to followers
+                for (final PeerId peer : peers) {
+                    if (peer.equals(this.serverId)) {
+                        continue;
+                    }
+                    this.replicatorGroup.sendHeartbeat(peer, heartbeatDone);
+                }
+                break;
+            case ReadOnlyLeaseBased:
+                // Responses to followers and local node.
+                respBuilder.setSuccess(true);
+                closure.setResponse(respBuilder.build());
+                closure.run(Status.OK());
+                break;
+        }
     }
 
-    @Override
-    public Message handleTimeoutNowRequest(RpcRequests.TimeoutNowRequest request, RpcRequestClosure done) {
-        return null;
-    }
 
-    @Override
-    public void handleReadIndexRequest(RpcRequests.ReadIndexRequest request, RpcResponseClosure<RpcRequests.ReadIndexResponse> done) {
-
+    private int getQuorum() {
+        final Configuration c = this.conf.getConf();
+        if (c.isEmpty()) {
+            return 0;
+        }
+        return c.getPeers().size() / 2 + 1;
     }
 
 
@@ -1298,6 +1394,7 @@ public class NodeImpl implements INode, RaftServerService {
             throw new IllegalStateException("Node is shutting down");
         }
         Requires.requireNonNull(done, "Null closure");
+        this.readOnlyService.addRequest(requestContext, done);
     }
 
 

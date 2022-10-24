@@ -30,7 +30,8 @@ raft协议：https://raft.github.io/
 我们一定能读到这个值，不可能读到 t1 之前的旧值(想想 Java 中的 volatile 关键字，即线性一致读就是在分布式系统中实现 Java volatile 语义)。
 简而言之是需要在分布式环境中实现 Java volatile 语义效果，即当 Client 向集群发起写操作的请求并且获得成功响应之后，该写操作的结果要对所有后来的读请求可见。
 和 volatile 的区别在于 volatile 是实现线程之间的可见，而 Open-Raft 需要实现 Server 之间的可见。
-![img.png](img.png)
+![img.png](img.png)  
+如上图 Client A、B、C、D 均符合线性一致读，其中 D 看起来是 Stale Read，其实并不是，D 请求横跨 3 个阶段，而 Read 可能发生在任意时刻，所以读到 1 或 2 都行。
 
 
 #### Batch

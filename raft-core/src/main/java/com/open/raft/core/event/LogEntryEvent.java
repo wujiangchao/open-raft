@@ -6,7 +6,7 @@ import com.open.raft.entity.LogEntry;
 import java.util.concurrent.CountDownLatch;
 
 /**
- * @Description TODO
+ * @Description 
  * @Date 2022/9/28 10:24
  * @Author jack wu
  */
@@ -14,7 +14,7 @@ public class LogEntryEvent {
     public LogEntry entry;
     public Closure done;
     public long expectedTerm;
-    CountDownLatch shutdownLatch;
+    public CountDownLatch shutdownLatch;
 
     public void reset() {
         this.entry = null;

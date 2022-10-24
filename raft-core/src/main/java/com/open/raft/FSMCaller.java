@@ -12,6 +12,22 @@ import com.open.raft.option.FSMCallerOptions;
 public interface FSMCaller extends Lifecycle<FSMCallerOptions>{
 
     /**
+     * Listen on lastAppliedLogIndex update events.
+     *
+     * @author dennis
+     */
+    interface LastAppliedLogIndexListener {
+
+        /**
+         * Called when lastAppliedLogIndex updated.
+         *
+         * @param lastAppliedLogIndex the log index of last applied
+         */
+        void onApplied(final long lastAppliedLogIndex);
+    }
+
+
+    /**
      * Called when stop following a leader.
      *
      * @param ctx context of leader change
