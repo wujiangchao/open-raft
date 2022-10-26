@@ -1,6 +1,7 @@
 package com.open.raft.core;
 
 import com.alipay.remoting.NamedThreadFactory;
+import com.google.protobuf.ZeroByteStringHelper;
 import com.lmax.disruptor.BlockingWaitStrategy;
 import com.lmax.disruptor.EventTranslator;
 import com.lmax.disruptor.RingBuffer;
@@ -10,20 +11,25 @@ import com.open.raft.FSMCaller;
 import com.open.raft.ReadOnlyService;
 import com.open.raft.Status;
 import com.open.raft.closure.ReadIndexClosure;
+import com.open.raft.closure.ReadIndexResponseClosure;
 import com.open.raft.core.event.ReadIndexEvent;
 import com.open.raft.core.event.ReadIndexEventFactory;
 import com.open.raft.core.event.ReadIndexEventHandler;
+import com.open.raft.entity.ReadIndexState;
 import com.open.raft.error.OverloadException;
 import com.open.raft.error.RaftError;
 import com.open.raft.error.RaftException;
 import com.open.raft.option.RaftOptions;
 import com.open.raft.option.ReadOnlyServiceOptions;
+import com.open.raft.rpc.RpcRequests;
 import com.open.raft.util.Bytes;
 import com.open.raft.util.DisruptorBuilder;
 import com.open.raft.util.Utils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -36,22 +42,24 @@ import java.util.concurrent.locks.ReentrantLock;
  * @Date 2022/10/24 9:05
  * @Author jack wu
  */
-public class ReadOnlyServiceImpl implements ReadOnlyService , FSMCaller.LastAppliedLogIndexListener {
-    private static final Logger LOG                 = LoggerFactory.getLogger(ReadOnlyServiceImpl.class);
-    /** Disruptor to run readonly service. */
+public class ReadOnlyServiceImpl implements ReadOnlyService, FSMCaller.LastAppliedLogIndexListener {
+    private static final Logger LOG = LoggerFactory.getLogger(ReadOnlyServiceImpl.class);
+    /**
+     * Disruptor to run readonly service.
+     */
     private Disruptor<ReadIndexEvent> readIndexDisruptor;
     private RingBuffer<ReadIndexEvent> readIndexQueue;
     private RaftOptions raftOptions;
-    private NodeImpl                                   node;
-    private final Lock lock                = new ReentrantLock();
-    private FSMCaller                                  fsmCaller;
+    private NodeImpl node;
+    private final Lock lock = new ReentrantLock();
+    private FSMCaller fsmCaller;
     private volatile CountDownLatch shutdownLatch;
 
     private ScheduledExecutorService scheduledExecutorService;
 
-    private NodeMetrics                                nodeMetrics;
+    private NodeMetrics nodeMetrics;
 
-    private volatile RaftException                     error;
+    private volatile RaftException error;
 
     @Override
     public boolean init(final ReadOnlyServiceOptions opts) {
@@ -62,14 +70,14 @@ public class ReadOnlyServiceImpl implements ReadOnlyService , FSMCaller.LastAppl
 
         this.scheduledExecutorService = Executors
                 .newSingleThreadScheduledExecutor(new NamedThreadFactory("ReadOnlyService-PendingNotify-Scanner", true));
-        this.readIndexDisruptor = DisruptorBuilder.<ReadIndexEvent> newInstance()
+        this.readIndexDisruptor = DisruptorBuilder.<ReadIndexEvent>newInstance()
                 .setEventFactory(new ReadIndexEventFactory())
                 .setRingBufferSize(this.raftOptions.getDisruptorBufferSize())
                 .setThreadFactory(new NamedThreadFactory("Raft-ReadOnlyService-Disruptor-", true))
                 .setWaitStrategy(new BlockingWaitStrategy())
                 .setProducerType(ProducerType.MULTI)
                 .build();
-        this.readIndexDisruptor.handleEventsWith(new ReadIndexEventHandler());
+        this.readIndexDisruptor.handleEventsWith(new ReadIndexEventHandler(this));
         this.readIndexDisruptor
                 .setDefaultExceptionHandler(new LogExceptionHandler<Object>(getClass().getSimpleName()));
         this.readIndexQueue = this.readIndexDisruptor.start();
@@ -148,5 +156,34 @@ public class ReadOnlyServiceImpl implements ReadOnlyService , FSMCaller.LastAppl
     @Override
     public void onApplied(long lastAppliedLogIndex) {
 
+    }
+
+    /**
+     * event 是批量处理的
+     *
+     * @param events
+     */
+    public void executeReadIndexEvents(final List<ReadIndexEvent> events) {
+        if (events.isEmpty()) {
+            return;
+        }
+        final RpcRequests.ReadIndexRequest.Builder rb = RpcRequests.ReadIndexRequest.newBuilder()
+                .setGroupId(this.node.getGroupId())
+                .setServerId(this.node.getServerId().toString());
+
+        //State VS  Status  https://www.zhihu.com/question/21994784
+        final List<ReadIndexState> states = new ArrayList<>(events.size());
+
+        for (final ReadIndexEvent event : events) {
+            rb.addEntries(ZeroByteStringHelper.wrap(event.requestContext.get()));
+            states.add(new ReadIndexState(event.requestContext, event.done, event.startTime));
+        }
+        final RpcRequests.ReadIndexRequest request = rb.build();
+
+        this.node.handleReadIndexRequest(request, new ReadIndexResponseClosure(states, request));
+    }
+
+    public RaftOptions getRaftOptions() {
+        return raftOptions;
     }
 }

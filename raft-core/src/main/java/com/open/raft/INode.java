@@ -1,5 +1,6 @@
 package com.open.raft;
 
+import com.open.raft.closure.ReadIndexClosure;
 import com.open.raft.entity.NodeId;
 import com.open.raft.entity.PeerId;
 import com.open.raft.entity.Task;

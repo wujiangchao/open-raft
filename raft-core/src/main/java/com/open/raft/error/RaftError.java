@@ -43,6 +43,17 @@ public enum RaftError {
     EINTERNAL(1004),
 
     /**
+     * Host is down
+     */
+    EHOSTDOWN(1006),
+
+    /**
+     * Retry again
+     */
+    EAGAIN(1002),
+
+
+    /**
      * <pre>
      * Receive Higher Term Requests
      * </pre>

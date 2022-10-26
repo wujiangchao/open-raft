@@ -13,25 +13,33 @@ import java.util.List;
  */
 public class ReadIndexEventHandler implements EventHandler<ReadIndexEvent> {
     // task list for batch
-    private final List<ReadIndexEvent> events = new ArrayList<>(
-            ReadOnlyServiceImpl.this.raftOptions.getApplyBatch());
+    private final List<ReadIndexEvent> events;
+    private ReadOnlyServiceImpl readOnlyService;
+
+    public ReadIndexEventHandler(ReadOnlyServiceImpl readOnlyService) {
+        this.readOnlyService = readOnlyService;
+        events = new ArrayList<>(
+                readOnlyService.getRaftOptions().getApplyBatch());
+
+    }
 
     @Override
     public void onEvent(final ReadIndexEvent newEvent, final long sequence, final boolean endOfBatch)
             throws Exception {
         if (newEvent.shutdownLatch != null) {
-            executeReadIndexEvents(this.events);
+            readOnlyService.executeReadIndexEvents(this.events);
             reset();
             newEvent.shutdownLatch.countDown();
             return;
         }
 
         this.events.add(newEvent);
-        if (this.events.size() >= ReadOnlyServiceImpl.this.raftOptions.getApplyBatch() || endOfBatch) {
-            executeReadIndexEvents(this.events);
+        if (this.events.size() >= readOnlyService.getRaftOptions().getApplyBatch() || endOfBatch) {
+            readOnlyService.executeReadIndexEvents(this.events);
             reset();
         }
     }
+
     private void reset() {
         for (final ReadIndexEvent event : this.events) {
             event.reset();
