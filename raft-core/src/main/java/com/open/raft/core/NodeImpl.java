@@ -1000,6 +1000,8 @@ public class NodeImpl implements INode, RaftServerService {
     private void readLeader(final RpcRequests.ReadIndexRequest request, final RpcRequests.ReadIndexResponse.Builder respBuilder,
                             final RpcResponseClosure<RpcRequests.ReadIndexResponse> closure) {
         final int quorum = getQuorum();
+        //检查当前 Raft 集群节点数量，如果集群只有一个 Peer 节点直接获取投票箱 BallotBox 最新提交索引 lastCommittedIndex
+        // 即 Leader 节点当前 Log 的 commitIndex 构建 ReadIndexClosure 响应
         if (quorum <= 1) {
             // Only one peer, fast path.
             respBuilder.setSuccess(true) //
@@ -1045,6 +1047,9 @@ public class NodeImpl implements INode, RaftServerService {
                     if (peer.equals(this.serverId)) {
                         continue;
                     }
+                    // 调用 Replicator#sendHeartbeat(rid, closure) 方法向 Followers 节点发送
+                    // Heartbeat 心跳请求，发送心跳成功执行 ReadIndexHeartbeatResponseClosure
+                    // 心跳响应回调
                     this.replicatorGroup.sendHeartbeat(peer, heartbeatDone);
                 }
                 break;
