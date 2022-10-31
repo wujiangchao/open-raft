@@ -38,6 +38,19 @@ public class RaftOptions implements Copiable<RaftOptions> {
     private boolean enableLogEntryChecksum = false;
 
 
+    /**
+     * ReadOnlyOption specifies how the read only request is processed.
+     * <p>
+     * {@link ReadOnlyOption#ReadOnlySafe} guarantees the linearizability of the read only request by
+     * communicating with the quorum. It is the default and suggested option.
+     * <p>
+     * {@link ReadOnlyOption#ReadOnlyLeaseBased} ensures linearizability of the read only request by
+     * relying on the leader lease. It can be affected by clock drift.
+     * If the clock drift is unbounded, leader might keep the lease longer than it
+     * should (clock can move backward/pause without any bound). ReadIndex is not safe
+     * in that case.
+     */
+    private ReadOnlyOption readOnlyOptions = ReadOnlyOption.ReadOnlySafe;
 
     @Override
     public RaftOptions copy() {
@@ -82,5 +95,13 @@ public class RaftOptions implements Copiable<RaftOptions> {
 
     public void setEnableLogEntryChecksum(boolean enableLogEntryChecksum) {
         this.enableLogEntryChecksum = enableLogEntryChecksum;
+    }
+
+    public ReadOnlyOption getReadOnlyOptions() {
+        return readOnlyOptions;
+    }
+
+    public void setReadOnlyOptions(ReadOnlyOption readOnlyOptions) {
+        this.readOnlyOptions = readOnlyOptions;
     }
 }

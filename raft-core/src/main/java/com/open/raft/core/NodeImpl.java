@@ -14,6 +14,7 @@ import com.open.raft.closure.ClosureQueue;
 import com.open.raft.closure.ClosureQueueImpl;
 import com.open.raft.closure.LeaderStableClosure;
 import com.open.raft.closure.ReadIndexClosure;
+import com.open.raft.closure.ReadIndexHeartbeatResponseClosure;
 import com.open.raft.conf.Configuration;
 import com.open.raft.conf.ConfigurationEntry;
 import com.open.raft.conf.ConfigurationManager;
@@ -37,6 +38,7 @@ import com.open.raft.option.LogManagerOptions;
 import com.open.raft.option.NodeOptions;
 import com.open.raft.option.RaftMetaStorageOptions;
 import com.open.raft.option.RaftOptions;
+import com.open.raft.option.ReadOnlyOption;
 import com.open.raft.option.ReadOnlyServiceOptions;
 import com.open.raft.option.ReplicatorGroupOptions;
 import com.open.raft.rpc.RaftClientService;
@@ -52,7 +54,6 @@ import com.open.raft.storage.impl.LogManagerImpl;
 import com.open.raft.storage.snapshot.SnapshotExecutor;
 import com.open.raft.util.RepeatedTimer;
 import com.open.raft.util.Requires;
-import com.open.raft.util.ThreadId;
 import com.open.raft.util.Utils;
 import com.open.raft.util.concurrent.NodeReadWriteLock;
 import org.slf4j.Logger;
@@ -62,7 +63,6 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
-import java.util.PriorityQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.Lock;
@@ -246,6 +246,7 @@ public class NodeImpl implements INode, RaftServerService {
     private int heartbeatTimeout(final int electionTimeout) {
         return Math.max(electionTimeout / this.raftOptions.getElectionHeartbeatFactor(), 10);
     }
+
     private boolean initLogStorage() {
         Requires.requireNonNull(this.fsmCaller, "Null fsm caller");
         this.logStorage = this.serviceFactory.createLogStorage(this.options.getLogUri(), this.raftOptions);
@@ -762,13 +763,13 @@ public class NodeImpl implements INode, RaftServerService {
      * currentTerm, logEntries[]：日志信息，为了效率，日志通常为多条
      * prevTerm, prevLogIndex：日志有效性检查
      * commitTerm, commitLogIndex：最新的提交日志位点(commitIndex)
-     *
+     * <p>
      * 校验当前的Node节点是否还处于活跃状态，如果不是的话，那么直接返回一个error的response
      * 校验请求的serverId的格式是否正确，不正确则返回一个error的response
      * 校验请求的任期是否小于当前的任期，如果是那么返回一个AppendEntriesResponse类型的response
      * 调用checkStepDown方法检测当前节点的任期，以及状态，是否有leader等
      * 如果请求的serverId和当前节点的leaderId是不是同一个，用来校验是不是leader发起的请求，如果不是返回一个AppendEntriesResponse
-     *
+     * <p>
      * 校验是否正在生成快照
      * 获取请求的Index在当前节点中对应的LogEntry的任期是不是和请求传入的任期相同，不同的话则返回AppendEntriesResponse
      * 如果传入的entriesCount为零，那么leader发送的可能是心跳或者发送的是sendEmptyEntry，返回AppendEntriesResponse，
@@ -1025,24 +1026,20 @@ public class NodeImpl implements INode, RaftServerService {
             final PeerId peer = new PeerId();
             peer.parse(request.getServerId());
             if (!this.conf.contains(peer) && !this.conf.containsLearner(peer)) {
-                closure
-                        .run(new Status(RaftError.EPERM, "Peer %s is not in current configuration: %s.", peer, this.conf));
+                closure.run(new Status(RaftError.EPERM, "Peer %s is not in current configuration: %s.", peer, this.conf));
                 return;
             }
         }
 
+        //默认 case ReadOnlySafe  时钟漂移的存在所以不用lease
         ReadOnlyOption readOnlyOpt = this.raftOptions.getReadOnlyOptions();
-        if (readOnlyOpt == ReadOnlyOption.ReadOnlyLeaseBased && !isLeaderLeaseValid()) {
-            // If leader lease timeout, we must change option to ReadOnlySafe
-            readOnlyOpt = ReadOnlyOption.ReadOnlySafe;
-        }
 
         switch (readOnlyOpt) {
             case ReadOnlySafe:
                 final List<PeerId> peers = this.conf.getConf().getPeers();
                 Requires.requireTrue(peers != null && !peers.isEmpty(), "Empty peers");
-                final ReadIndexHeartbeatResponseClosure heartbeatDone = new ReadIndexHeartbeatResponseClosure(closure,
-                        respBuilder, quorum, peers.size());
+                final ReadIndexHeartbeatResponseClosure heartbeatDone = new ReadIndexHeartbeatResponseClosure(
+                        respBuilder,closure, quorum, peers.size());
                 // Send heartbeat requests to followers
                 for (final PeerId peer : peers) {
                     if (peer.equals(this.serverId)) {
@@ -1312,7 +1309,7 @@ public class NodeImpl implements INode, RaftServerService {
                 task.reset();
             }
             //落盘后调用LeaderStableClosure，给自己投一票
-            this.logManager.appendEntries(entries, new LeaderStableClosure(entries,this));
+            this.logManager.appendEntries(entries, new LeaderStableClosure(entries, this));
             // update conf.first
             checkAndSetConfiguration(true);
         } finally {
@@ -1346,7 +1343,7 @@ public class NodeImpl implements INode, RaftServerService {
     }
 
     public void unsafeApplyConfiguration(final Configuration newConf, final Configuration oldConf,
-                                          final boolean leaderStart) {
+                                         final boolean leaderStart) {
         Requires.requireTrue(this.confCtx.isBusy(), "ConfigurationContext is not busy");
         final LogEntry entry = new LogEntry(EnumOutter.EntryType.ENTRY_TYPE_CONFIGURATION);
         entry.setId(new LogId(0, this.currTerm));
@@ -1356,7 +1353,7 @@ public class NodeImpl implements INode, RaftServerService {
             entry.setOldPeers(oldConf.listPeers());
             entry.setOldLearners(oldConf.listLearners());
         }
-        final ConfigurationChangeDone configurationChangeDone = new ConfigurationChangeDone(this.currTerm, leaderStart,this);
+        final ConfigurationChangeDone configurationChangeDone = new ConfigurationChangeDone(this.currTerm, leaderStart, this);
         // Use the new_conf to deal the quorum of this very log
         if (!this.ballotBox.appendPendingTask(newConf, oldConf, configurationChangeDone)) {
             Utils.runClosureInThread(configurationChangeDone, new Status(RaftError.EINTERNAL, "Fail to append task."));
@@ -1364,7 +1361,7 @@ public class NodeImpl implements INode, RaftServerService {
         }
         final List<LogEntry> entries = new ArrayList<>();
         entries.add(entry);
-        this.logManager.appendEntries(entries, new LeaderStableClosure(entries,this));
+        this.logManager.appendEntries(entries, new LeaderStableClosure(entries, this));
         checkAndSetConfiguration(false);
     }
 
@@ -1508,6 +1505,4 @@ public class NodeImpl implements INode, RaftServerService {
         this.votedId = this.metaStorage.getVotedFor().copy();
         return true;
     }
-
-
 }
