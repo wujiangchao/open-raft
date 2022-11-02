@@ -1063,6 +1063,22 @@ public class NodeImpl implements INode, RaftServerService {
     }
 
 
+    private void readFollower(final RpcRequests.ReadIndexRequest request, final RpcResponseClosure<RpcRequests.ReadIndexResponse> closure) {
+        if (this.leaderId == null || this.leaderId.isEmpty()) {
+            closure.run(new Status(RaftError.EPERM, "No leader at term %d.", this.currTerm));
+            return;
+        }
+        // send request to leader.
+        final RpcRequests.ReadIndexRequest newRequest = RpcRequests.ReadIndexRequest.newBuilder()
+                .mergeFrom(request)
+                .setPeerId(this.leaderId.toString())
+                .build();
+        //向 Leader 发送 ReadIndex 请求，Leader 节点调用 readIndex(requestContext, done) 方法启动可线性化只读查询请求
+        //closure 是 ReadIndexResponseClosure
+        this.rpcService.readIndex(this.leaderId.getEndpoint(), newRequest, -1, closure);
+    }
+
+
     private int getQuorum() {
         final Configuration c = this.conf.getConf();
         if (c.isEmpty()) {

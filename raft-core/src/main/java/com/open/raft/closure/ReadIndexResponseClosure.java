@@ -26,11 +26,13 @@ class ReadIndexResponseClosure extends RpcResponseClosureAdapter<RpcRequests.Rea
 
     final List<ReadIndexState> states;
     final RpcRequests.ReadIndexRequest request;
+    final ReadOnlyServiceImpl readOnlyService;
 
-    public ReadIndexResponseClosure(final List<ReadIndexState> states, final RpcRequests.ReadIndexRequest request) {
+    public ReadIndexResponseClosure(final List<ReadIndexState> states, final RpcRequests.ReadIndexRequest request, ReadOnlyServiceImpl readOnlyService) {
         super();
         this.states = states;
         this.request = request;
+        this.readOnlyService = readOnlyService;
     }
 
     /**
@@ -56,28 +58,29 @@ class ReadIndexResponseClosure extends RpcResponseClosureAdapter<RpcRequests.Rea
         }
 
         boolean doUnlock = true;
-        ReadOnlyServiceImpl.this.lock.lock();
+        readOnlyService.lock.lock();
         try {
-            if (readIndexStatus.isApplied(ReadOnlyServiceImpl.this.fsmCaller.getLastAppliedIndex())) {
+            //判断commitindex 是否被apply
+            if (readIndexStatus.isApplied(readOnlyService.fsmCaller.getLastAppliedIndex())) {
                 // Already applied, notify readIndex request.
-                ReadOnlyServiceImpl.this.lock.unlock();
+                readOnlyService.lock.unlock();
                 doUnlock = false;
                 notifySuccess(readIndexStatus);
             } else {
-                if (readIndexStatus.isOverMaxReadIndexLag(ReadOnlyServiceImpl.this.fsmCaller.getLastAppliedIndex(), ReadOnlyServiceImpl.this.raftOptions.getMaxReadIndexLag())) {
-                    ReadOnlyServiceImpl.this.lock.unlock();
+                if (readIndexStatus.isOverMaxReadIndexLag(ReadreadOnlyService.fsmCaller.getLastAppliedIndex(), ReadreadOnlyService.raftOptions.getMaxReadIndexLag())) {
+                    ReadreadOnlyService.lock.unlock();
                     doUnlock = false;
                     notifyFail(new Status(-1, "Fail to run ReadIndex task, the gap of current node's apply index between leader's commit index over maxReadIndexLag"));
                 } else {
                     // Not applied, add it to pending-notify cache.
-                    ReadOnlyServiceImpl.this.pendingNotifyStatus
-                            .computeIfAbsent(readIndexStatus.getIndex(), k -> new ArrayList<>(10)) //
+                    ReadreadOnlyService.pendingNotifyStatus
+                            .computeIfAbsent(readIndexStatus.getIndex(), k -> new ArrayList<>(10))
                             .add(readIndexStatus);
                 }
             }
         } finally {
             if (doUnlock) {
-                ReadOnlyServiceImpl.this.lock.unlock();
+                ReadreadOnlyService.lock.unlock();
             }
         }
     }
@@ -85,7 +88,7 @@ class ReadIndexResponseClosure extends RpcResponseClosureAdapter<RpcRequests.Rea
     private void notifyFail(final Status status) {
         final long nowMs = Utils.monotonicMs();
         for (final ReadIndexState state : this.states) {
-            ReadOnlyServiceImpl.this.nodeMetrics.recordLatency("read-index", nowMs - state.getStartTimeMs());
+            ReadreadOnlyService.nodeMetrics.recordLatency("read-index", nowMs - state.getStartTimeMs());
             final ReadIndexClosure done = state.getDone();
             if (done != null) {
                 final Bytes reqCtx = state.getRequestContext();

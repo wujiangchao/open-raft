@@ -180,7 +180,7 @@ public class ReadOnlyServiceImpl implements ReadOnlyService, FSMCaller.LastAppli
         }
         final RpcRequests.ReadIndexRequest request = rb.build();
 
-        this.node.handleReadIndexRequest(request, new ReadIndexResponseClosure(states, request));
+        this.node.handleReadIndexRequest(request, new ReadIndexResponseClosure(states, request, this));
     }
 
     public RaftOptions getRaftOptions() {
