@@ -984,6 +984,7 @@ public class NodeImpl implements INode, RaftServerService {
                     readFollower(request, done);
                     break;
                 case STATE_TRANSFERRING:
+                    // 当前正在发生选主过程，无法满足线性读的要求
                     done.run(new Status(RaftError.EBUSY, "Is transferring leadership."));
                     break;
                 default:
@@ -1023,6 +1024,7 @@ public class NodeImpl implements INode, RaftServerService {
         }
         respBuilder.setIndex(lastCommittedIndex);
 
+        // 如果是从 Follower 节点或者 Learner 节点发起的读请求，则需要判断他们在不在当前的Raft Conf里面
         if (request.getPeerId() != null) {
             // request from follower or learner, check if the follower/learner is in current conf.
             final PeerId peer = new PeerId();
@@ -1043,13 +1045,16 @@ public class NodeImpl implements INode, RaftServerService {
                 final ReadIndexHeartbeatResponseClosure heartbeatDone = new ReadIndexHeartbeatResponseClosure(
                         respBuilder,closure, quorum, peers.size());
                 // Send heartbeat requests to followers
+                // 线性安全读的模式，需要向所有的成员发送心跳信息
                 for (final PeerId peer : peers) {
                     if (peer.equals(this.serverId)) {
                         continue;
                     }
                     // 调用 Replicator#sendHeartbeat(rid, closure) 方法向 Followers 节点发送
-                    // Heartbeat 心跳请求，发送心跳成功执行 ReadIndexHeartbeatResponseClosure
+                    // Heartbeat 心跳请求， 发送心跳成功执行 ReadIndexHeartbeatResponseClosure
                     // 心跳响应回调
+
+                    //sendHeartbeat 后ballotBox会更新lastCommittedIndex
                     this.replicatorGroup.sendHeartbeat(peer, heartbeatDone);
                 }
                 break;
