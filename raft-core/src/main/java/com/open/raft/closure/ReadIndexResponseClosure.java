@@ -115,7 +115,8 @@ class ReadIndexResponseClosure extends RpcResponseClosureAdapter<RpcRequests.Rea
         final int taskCount = states.size();
         for (int i = 0; i < taskCount; i++) {
             final ReadIndexState task = states.get(i);
-            final ReadIndexClosure done = task.getDone(); // stack copy
+            // stack copy
+            final ReadIndexClosure done = task.getDone();
             if (done != null) {
                 this.nodeMetrics.recordLatency("read-index", nowMs - task.getStartTimeMs());
                 done.setResult(task.getIndex(), task.getRequestContext().get());

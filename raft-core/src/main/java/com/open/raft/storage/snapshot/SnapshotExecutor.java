@@ -2,8 +2,11 @@
 package com.open.raft.storage.snapshot;
 
 import com.open.raft.Closure;
+import com.open.raft.Lifecycle;
 import com.open.raft.core.NodeImpl;
+import com.open.raft.option.SnapshotExecutorOptions;
 import com.open.raft.rpc.RpcRequestClosure;
+import com.open.raft.rpc.RpcRequests;
 import com.open.raft.storage.SnapshotStorage;
 
 /**
@@ -40,7 +43,7 @@ public interface SnapshotExecutor extends Lifecycle<SnapshotExecutorOptions>, De
      *    a new RPC with the same or newer snapshot arrives
      * - Busy: the state machine is saving or loading snapshot
      */
-    void installSnapshot(final InstallSnapshotRequest request, final InstallSnapshotResponse.Builder response,
+    void installSnapshot(final RpcRequests.InstallSnapshotRequest request, final RpcRequests.InstallSnapshotResponse.Builder response,
                          final RpcRequestClosure done);
 
     /**

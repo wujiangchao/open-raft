@@ -54,6 +54,12 @@ public enum RaftError {
 
 
     /**
+     * Invalid value.
+     */
+    EINVAL(1015),
+
+
+    /**
      * <pre>
      * Receive Higher Term Requests
      * </pre>

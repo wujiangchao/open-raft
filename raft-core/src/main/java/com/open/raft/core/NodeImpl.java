@@ -41,6 +41,7 @@ import com.open.raft.option.RaftOptions;
 import com.open.raft.option.ReadOnlyOption;
 import com.open.raft.option.ReadOnlyServiceOptions;
 import com.open.raft.option.ReplicatorGroupOptions;
+import com.open.raft.option.SnapshotExecutorOptions;
 import com.open.raft.rpc.RaftClientService;
 import com.open.raft.rpc.RaftServerService;
 import com.open.raft.rpc.RpcRequestClosure;
@@ -52,10 +53,12 @@ import com.open.raft.storage.LogStorage;
 import com.open.raft.storage.RaftMetaStorage;
 import com.open.raft.storage.impl.LogManagerImpl;
 import com.open.raft.storage.snapshot.SnapshotExecutor;
+import com.open.raft.storage.snapshot.SnapshotExecutorImpl;
 import com.open.raft.util.RepeatedTimer;
 import com.open.raft.util.Requires;
 import com.open.raft.util.Utils;
 import com.open.raft.util.concurrent.NodeReadWriteLock;
+import org.apache.commons.lang.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -210,6 +213,20 @@ public class NodeImpl implements INode, RaftServerService {
             return false;
         }
 
+
+        //初始化快照存储功能
+        if (!initSnapshotStorage()) {
+            LOG.error("Node {} initSnapshotStorage failed.", getNodeId());
+            return false;
+        }
+        //校验日志文件索引的一致性
+        //检查快照index是否落在first & last log index之内
+        final Status st = this.logManager.checkConsistency();
+        if (!st.isOk()) {
+            LOG.error("Node {} is initialized with inconsistent log, status={}.", getNodeId(), st);
+            return false;
+        }
+
         // TODO RPC service and ReplicatorGroup is in cycle dependent, refactor it
         this.replicatorGroup = new ReplicatorGroupImpl();
         //收其他节点或者客户端发过来的请求，转交给对应服务处理
@@ -279,6 +296,25 @@ public class NodeImpl implements INode, RaftServerService {
         return this.fsmCaller.init(opts);
     }
 
+    private boolean initSnapshotStorage() {
+        if (StringUtils.isEmpty(this.options.getSnapshotUri())) {
+            LOG.warn("Do not set snapshot uri, ignore initSnapshotStorage.");
+            return true;
+        }
+        this.snapshotExecutor = new SnapshotExecutorImpl();
+        final SnapshotExecutorOptions opts = new SnapshotExecutorOptions();
+        opts.setUri(this.options.getSnapshotUri());
+        opts.setFsmCaller(this.fsmCaller);
+        opts.setNode(this);
+        opts.setLogManager(this.logManager);
+        opts.setAddr(this.serverId != null ? this.serverId.getEndpoint() : null);
+        opts.setInitTerm(this.currTerm);
+        opts.setFilterBeforeCopyRemote(this.options.isFilterBeforeCopyRemote());
+        // get snapshot throttle
+        opts.setSnapshotThrottle(this.options.getSnapshotThrottle());
+        return this.snapshotExecutor.init(opts);
+    }
+
     private void afterShutdown() {
         List<Closure> savedDoneList = null;
         this.writeLock.lock();
@@ -334,6 +370,30 @@ public class NodeImpl implements INode, RaftServerService {
         } finally {
             if (doUnlock) {
                 this.writeLock.unlock();
+            }
+        }
+    }
+
+    private void handleSnapshotTimeout() {
+        this.writeLock.lock();
+        try {
+            if (!this.state.isActive()) {
+                return;
+            }
+        } finally {
+            this.writeLock.unlock();
+        }
+        // do_snapshot in another thread to avoid blocking the timer thread.
+        Utils.runInThread(() -> doSnapshot(null));
+    }
+
+    private void doSnapshot(final Closure done) {
+        if (this.snapshotExecutor != null) {
+            this.snapshotExecutor.doSnapshot(done);
+        } else {
+            if (done != null) {
+                final Status status = new Status(RaftError.EINVAL, "Snapshot is not supported");
+                Utils.runClosureInThread(done, status);
             }
         }
     }
