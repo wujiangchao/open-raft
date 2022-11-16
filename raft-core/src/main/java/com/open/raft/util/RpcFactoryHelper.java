@@ -3,6 +3,7 @@ package com.open.raft.util;
 
 
 import com.open.raft.rpc.RaftRpcFactory;
+import com.open.raft.rpc.RpcResponseFactory;
 
 /**
  * @auth jack.wu

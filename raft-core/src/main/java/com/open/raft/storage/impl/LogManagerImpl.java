@@ -24,6 +24,7 @@ import com.open.raft.option.RaftOptions;
 import com.open.raft.storage.LogManager;
 import com.open.raft.storage.LogStorage;
 import com.open.raft.util.ArrayDeque;
+import com.open.raft.util.DisruptorBuilder;
 import com.open.raft.util.Requires;
 import com.open.raft.util.SegmentList;
 import com.open.raft.util.Utils;

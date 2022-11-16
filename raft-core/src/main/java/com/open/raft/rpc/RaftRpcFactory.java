@@ -6,5 +6,10 @@ package com.open.raft.rpc;
  * @Author jack wu
  */
 public interface RaftRpcFactory {
-    
+
+    RpcResponseFactory DEFAULT = new RpcResponseFactory() {};
+
+    default RpcResponseFactory getRpcResponseFactory() {
+        return DEFAULT;
+    }
 }

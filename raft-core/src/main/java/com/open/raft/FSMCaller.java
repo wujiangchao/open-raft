@@ -48,4 +48,17 @@ public interface FSMCaller extends Lifecycle<FSMCallerOptions>{
      */
     boolean onError(final RaftException error);
 
+    /**
+     * Returns the last log entry index to apply state machine.
+     */
+    long getLastAppliedIndex();
+
+    /**
+     * Called after saving snapshot.
+     *
+     * @param done callback
+     */
+    boolean onSnapshotSave(final SaveSnapshotClosure done);
+
+
 }

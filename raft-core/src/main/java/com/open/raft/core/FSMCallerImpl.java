@@ -161,6 +161,11 @@ public class FSMCallerImpl implements FSMCaller {
     }
 
     @Override
+    public boolean onError(RaftException error) {
+        return false;
+    }
+
+    @Override
     public boolean init(FSMCallerOptions opts) {
         this.logManager = opts.getLogManager();
         this.fsm = opts.getFsm();
@@ -376,4 +381,21 @@ public class FSMCallerImpl implements FSMCaller {
             done.onCommitted();
         }
     }
+
+    @Override
+    public long getLastAppliedIndex() {
+        return this.lastAppliedIndex.get();
+    }
+
+    @Override
+    public boolean onSnapshotSave(SaveSnapshotClosure done) {
+
+        //发布事件到ApplyTaskHandler中处理
+        return enqueueTask((task, sequence) -> {
+            task.type = TaskType.SNAPSHOT_SAVE;
+            task.done = done;
+        });
+    }
+
+
 }

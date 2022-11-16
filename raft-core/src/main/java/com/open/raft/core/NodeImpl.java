@@ -56,6 +56,7 @@ import com.open.raft.storage.snapshot.SnapshotExecutor;
 import com.open.raft.storage.snapshot.SnapshotExecutorImpl;
 import com.open.raft.util.RepeatedTimer;
 import com.open.raft.util.Requires;
+import com.open.raft.util.RpcFactoryHelper;
 import com.open.raft.util.Utils;
 import com.open.raft.util.concurrent.NodeReadWriteLock;
 import org.apache.commons.lang.StringUtils;
@@ -67,6 +68,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReadWriteLock;
@@ -92,6 +94,8 @@ public class NodeImpl implements INode, RaftServerService {
      */
     private volatile int electionTimeoutCounter;
 
+    public final static RaftTimerFactory TIMER_FACTORY = JRaftUtils
+            .raftTimerFactory();
 
     /**
      * Raft group and node options and identifier
@@ -192,6 +196,98 @@ public class NodeImpl implements INode, RaftServerService {
         //this.metrics = new NodeMetrics(opts.isEnableMetrics());
         this.serverId.setPriority(opts.getElectionPriority());
         this.electionTimeoutCounter = 0;
+
+        this.timerManager = TIMER_FACTORY.getRaftScheduler(this.options.isSharedTimerPool(),
+                this.options.getTimerPoolSize(), "JRaft-Node-ScheduleThreadPool");
+
+        /**
+         * voteTimer是用来控制选举的，如果选举超时，当前的节点又是候选者角色，那么就会发起选举。
+         *  electionTimer是预投票计时器。候选者在发起投票之前，先发起预投票，如果没有得到半数以上节点的反馈，则候选者就会识趣的放弃参选。
+         *  stepDownTimer定时检查是否需要重新选举leader。当前的leader可能出现它的Follower可能并没有整个集群的1/2却还没有下台的情况，那么这个时候会定期的检查看leader的Follower是否有那么多，没有那么多的话会强制让leader下台。
+         *  snapshotTimer快照计时器。这个计时器会每隔1小时触发一次生成一个快照。
+         *
+         * 这些计时器的具体实现现在暂时不表，等到要讲具体功能的时候再进行梳理。
+         *
+         * 这些计时器有一个共同的特点就是会根据不同的计时器返回一个在一定范围内随机的时间。返回一个随机的时间可以防止多个节点在同一时间内同时发起投票选举从而降低选举失败的概率。
+         */
+
+        // Init timers
+        final String suffix = getNodeId().toString();
+        String name = "JRaft-VoteTimer-" + suffix;
+        //用来控制选举
+        this.voteTimer = new RepeatedTimer(name, this.options.getElectionTimeoutMs(), TIMER_FACTORY.getVoteTimer(
+                this.options.isSharedVoteTimer(), name)) {
+
+            @Override
+            protected void onTrigger() {
+                handleVoteTimeout();
+            }
+
+            @Override
+            protected int adjustTimeout(final int timeoutMs) {
+                return randomTimeout(timeoutMs);
+            }
+        };
+
+        //设置预投票计时器
+        //当leader在规定的一段时间内没有与 Follower 舰船进行通信时，
+        // Follower 就可以认为leader已经不能正常担任旗舰的职责，则 Follower 可以去尝试接替leader的角色。
+        // 这段通信超时被称为 Election Timeout
+        //候选者在发起投票之前，先发起预投票
+        name = "JRaft-ElectionTimer-" + suffix;
+        this.electionTimer = new RepeatedTimer(name, this.options.getElectionTimeoutMs(),
+                TIMER_FACTORY.getElectionTimer(this.options.isSharedElectionTimer(), name)) {
+
+            @Override
+            protected void onTrigger() {
+                handleElectionTimeout();
+            }
+
+            @Override
+            protected int adjustTimeout(final int timeoutMs) {
+                //在一定范围内返回一个随机的时间戳
+                //为了避免同时发起选举而导致失败
+                return randomTimeout(timeoutMs);
+            }
+        };
+        //用来控制leader下台
+        //定时检查是否需要重新选举leader
+        name = "JRaft-StepDownTimer-" + suffix;
+        this.stepDownTimer = new RepeatedTimer(name, this.options.getElectionTimeoutMs() >> 1,
+                TIMER_FACTORY.getStepDownTimer(this.options.isSharedStepDownTimer(), name)) {
+
+            @Override
+            protected void onTrigger() {
+                handleStepDownTimeout();
+            }
+        };
+        name = "JRaft-SnapshotTimer-" + suffix;
+        this.snapshotTimer = new RepeatedTimer(name, this.options.getSnapshotIntervalSecs() * 1000,
+                TIMER_FACTORY.getSnapshotTimer(this.options.isSharedSnapshotTimer(), name)) {
+
+            private volatile boolean firstSchedule = true;
+
+            @Override
+            protected void onTrigger() {
+                handleSnapshotTimeout();
+            }
+
+            @Override
+            protected int adjustTimeout(final int timeoutMs) {
+                if (!this.firstSchedule) {
+                    return timeoutMs;
+                }
+
+                // Randomize the first snapshot trigger timeout
+                this.firstSchedule = false;
+                if (timeoutMs > 0) {
+                    int half = timeoutMs / 2;
+                    return half + ThreadLocalRandom.current().nextInt(half);
+                } else {
+                    return timeoutMs;
+                }
+            }
+        };
 
 
         //fsmCaller封装对业务 StateMachine 的状态转换的调用以及日志的写入等
