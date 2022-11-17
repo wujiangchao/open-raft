@@ -33,6 +33,7 @@ import com.open.raft.entity.RaftOutter;
 import com.open.raft.entity.Task;
 import com.open.raft.error.OverloadException;
 import com.open.raft.error.RaftError;
+import com.open.raft.error.RaftException;
 import com.open.raft.option.FSMCallerOptions;
 import com.open.raft.option.LogManagerOptions;
 import com.open.raft.option.NodeOptions;
@@ -1686,5 +1687,34 @@ public class NodeImpl implements INode, RaftServerService {
         this.currTerm = this.metaStorage.getTerm();
         this.votedId = this.metaStorage.getVotedFor().copy();
         return true;
+    }
+
+    /**
+     * 节点发生错误时
+     * @param error
+     */
+    public void onError(final RaftException error) {
+        LOG.warn("Node {} got error: {}.", getNodeId(), error);
+        if (this.fsmCaller != null) {
+            // onError of fsmCaller is guaranteed to be executed once.
+            this.fsmCaller.onError(error);
+        }
+        if (this.readOnlyService != null) {
+            this.readOnlyService.setError(error);
+        }
+        this.writeLock.lock();
+        try {
+            // If it is leader, need to wake up a new one;
+            // If it is follower, also step down to call on_stop_following.
+            if (this.state.compareTo(State.STATE_FOLLOWER) <= 0) {
+                stepDown(this.currTerm, this.state == State.STATE_LEADER, new Status(RaftError.EBADNODE,
+                        "Raft node(leader or candidate) is in error."));
+            }
+            if (this.state.compareTo(State.STATE_ERROR) < 0) {
+                this.state = State.STATE_ERROR;
+            }
+        } finally {
+            this.writeLock.unlock();
+        }
     }
 }

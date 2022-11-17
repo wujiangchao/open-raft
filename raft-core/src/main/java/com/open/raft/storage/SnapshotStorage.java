@@ -22,6 +22,7 @@ import com.alipay.sofa.jraft.storage.snapshot.SnapshotCopier;
 import com.alipay.sofa.jraft.storage.snapshot.SnapshotReader;
 import com.alipay.sofa.jraft.storage.snapshot.SnapshotWriter;
 import com.open.raft.Lifecycle;
+import com.open.raft.storage.snapshot.SnapshotReader;
 
 /**
  * Snapshot storage.

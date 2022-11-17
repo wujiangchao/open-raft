@@ -567,4 +567,14 @@ public class LogManagerImpl implements LogManager {
             clearMemoryLogs(clearId);
         }
     }
+
+    @Override
+    public ConfigurationEntry getConfiguration(final long index) {
+        this.readLock.lock();
+        try {
+            return this.configManager.get(index);
+        } finally {
+            this.readLock.unlock();
+        }
+    }
 }

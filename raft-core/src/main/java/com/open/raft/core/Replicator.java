@@ -4,6 +4,7 @@ import com.codahale.metrics.MetricFilter;
 import com.codahale.metrics.MetricRegistry;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Message;
+import com.google.protobuf.ZeroByteStringHelper;
 import com.open.raft.INode;
 import com.open.raft.Status;
 import com.open.raft.closure.CatchUpClosure;
@@ -335,7 +336,7 @@ public class Replicator  implements ThreadId.OnError {
                                         getResponse(), seq, stateVersion, monotonicSendTimeMs);
                             }
 
-                        });
+                });
                 //Inflight 是对批量发送出去的 logEntry 的一种抽象，他表示哪些 logEntry 已经被封装成日志复制 request 发送出去了
                 //这里是将logEntry封装到Inflight中
                 addInflight(RequestType.AppendEntries, this.nextIndex, 0, 0, seq, rpcFuture);
@@ -541,6 +542,7 @@ public class Replicator  implements ThreadId.OnError {
         sendEmptyEntries(false);
     }
 
+
     private boolean fillCommonFields(final RpcRequests.AppendEntriesRequest.Builder rb, long prevLogIndex, final boolean isHeartbeat) {
         final long prevLogTerm = this.options.getLogManager().getTerm(prevLogIndex);
         //
@@ -635,7 +637,7 @@ public class Replicator  implements ThreadId.OnError {
             }
 
             //设置请求参数
-            final InstallSnapshotRequest.Builder rb = InstallSnapshotRequest.newBuilder();
+            final RpcRequests.InstallSnapshotRequest.Builder rb = RpcRequests.InstallSnapshotRequest.newBuilder();
             rb.setTerm(this.options.getTerm());
             rb.setGroupId(this.options.getGroupId());
             rb.setServerId(this.options.getServerId().toString());
@@ -647,7 +649,7 @@ public class Replicator  implements ThreadId.OnError {
             this.statInfo.lastLogIncluded = meta.getLastIncludedIndex();
             this.statInfo.lastTermIncluded = meta.getLastIncludedTerm();
 
-            final InstallSnapshotRequest request = rb.build();
+            final RpcRequests.InstallSnapshotRequest request = rb.build();
             setState(State.Snapshot);
             // noinspection NonAtomicOperationOnVolatileField
             this.installSnapshotCounter++;
@@ -656,7 +658,7 @@ public class Replicator  implements ThreadId.OnError {
             final int seq = getAndIncrementReqSeq();
             //发起InstallSnapshotRequest请求
             final Future<Message> rpcFuture = this.rpcService.installSnapshot(this.options.getPeerId().getEndpoint(),
-                    request, new RpcResponseClosureAdapter<InstallSnapshotResponse>() {
+                    request, new RpcResponseClosureAdapter<RpcRequests.InstallSnapshotResponse>() {
 
                         @Override
                         public void run(final Status status) {
@@ -685,14 +687,17 @@ public class Replicator  implements ThreadId.OnError {
                     + this.lastLogIncluded + ", lastLogIndex=" + this.lastLogIndex + ", lastTermIncluded="
                     + this.lastTermIncluded + ">";
         }
-
     }
 
     enum RunningState {
-        IDLE, // idle
-        BLOCKING, // blocking state
-        APPENDING_ENTRIES, // appending log entries
-        INSTALLING_SNAPSHOT // installing snapshot
+        // idle
+        IDLE,
+        // blocking state
+        BLOCKING,
+        // appending log entries
+        APPENDING_ENTRIES,
+        // installing snapshot
+        INSTALLING_SNAPSHOT
     }
 
     private int getAndIncrementReqSeq() {
@@ -1353,6 +1358,21 @@ public class Replicator  implements ThreadId.OnError {
             this.requiredNextSeq = 0;
         }
         return prev;
+    }
+
+    private void unlockId() {
+        if (this.id == null) {
+            return;
+        }
+        this.id.unlock();
+    }
+
+
+    private void releaseReader() {
+        if (this.reader != null) {
+            Utils.closeQuietly(this.reader);
+            this.reader = null;
+        }
     }
 
 }

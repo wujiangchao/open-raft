@@ -2,6 +2,7 @@ package com.open.raft.storage;
 
 import com.open.raft.Closure;
 import com.open.raft.Lifecycle;
+import com.open.raft.conf.ConfigurationEntry;
 import com.open.raft.entity.LogEntry;
 import com.open.raft.entity.LogId;
 import com.open.raft.option.LogManagerOptions;
@@ -101,4 +102,9 @@ public interface LogManager extends Lifecycle<LogManagerOptions> {
      * @param done    callback
      */
     void appendEntries(final List<LogEntry> entries, StableClosure done);
+
+    /**
+     * Get the configuration at index.
+     */
+    ConfigurationEntry getConfiguration(final long index);
 }

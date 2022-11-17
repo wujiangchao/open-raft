@@ -14,10 +14,14 @@ import com.open.raft.StateMachine;
 import com.open.raft.Status;
 import com.open.raft.closure.ClosureQueue;
 import com.open.raft.closure.TaskClosure;
+import com.open.raft.conf.ConfigurationEntry;
 import com.open.raft.entity.EnumOutter;
 import com.open.raft.entity.LeaderChangeContext;
 import com.open.raft.entity.LogEntry;
 import com.open.raft.entity.LogId;
+import com.open.raft.entity.PeerId;
+import com.open.raft.entity.RaftOutter;
+import com.open.raft.error.RaftError;
 import com.open.raft.error.RaftException;
 import com.open.raft.option.FSMCallerOptions;
 import com.open.raft.storage.LogManager;
@@ -71,16 +75,16 @@ public class FSMCallerImpl implements FSMCaller {
      * 2018-Apr-03 11:12:25 AM
      */
     private enum TaskType {
-        IDLE, //
-        COMMITTED, //
-        SNAPSHOT_SAVE, //
-        SNAPSHOT_LOAD, //
-        LEADER_STOP, //
-        LEADER_START, //
-        START_FOLLOWING, //
-        STOP_FOLLOWING, //
-        SHUTDOWN, //
-        FLUSH, //
+        IDLE,
+        COMMITTED,
+        SNAPSHOT_SAVE,
+        SNAPSHOT_LOAD,
+        LEADER_STOP,
+        LEADER_START,
+        START_FOLLOWING,
+        STOP_FOLLOWING,
+        SHUTDOWN,
+        FLUSH,
         ERROR;
 
         private String metricName;
@@ -176,12 +180,12 @@ public class FSMCallerImpl implements FSMCaller {
         this.lastAppliedIndex.set(opts.getBootstrapId().getIndex());
         notifyLastAppliedIndexUpdated(this.lastAppliedIndex.get());
         this.lastAppliedTerm = opts.getBootstrapId().getTerm();
-        this.disruptor = DisruptorBuilder.<ApplyTask>newInstance() //
-                .setEventFactory(new ApplyTaskFactory()) //
-                .setRingBufferSize(opts.getDisruptorBufferSize()) //
-                .setThreadFactory(new NamedThreadFactory("Raft-FSMCaller-Disruptor-", true)) //
-                .setProducerType(ProducerType.MULTI) //
-                .setWaitStrategy(new BlockingWaitStrategy()) //
+        this.disruptor = DisruptorBuilder.<ApplyTask>newInstance()
+                .setEventFactory(new ApplyTaskFactory())
+                .setRingBufferSize(opts.getDisruptorBufferSize())
+                .setThreadFactory(new NamedThreadFactory("Raft-FSMCaller-Disruptor-", true))
+                .setProducerType(ProducerType.MULTI)
+                .setWaitStrategy(new BlockingWaitStrategy())
                 .build();
         this.disruptor.handleEventsWith(new ApplyTaskHandler());
         this.disruptor.setDefaultExceptionHandler(new LogExceptionHandler<Object>(getClass().getSimpleName()));
@@ -398,4 +402,45 @@ public class FSMCallerImpl implements FSMCaller {
     }
 
 
+    private void doSnapshotSave(final SaveSnapshotClosure done){
+        Requires.requireNonNull(done, "SaveSnapshotClosure is null");
+        //设置最新的任期和index到metaBuilder中
+        final long lastAppliedIndex = this.lastAppliedIndex.get();
+        final RaftOutter.SnapshotMeta.Builder metaBuilder = RaftOutter.SnapshotMeta.newBuilder()
+                .setLastIncludedIndex(lastAppliedIndex)
+                .setLastIncludedTerm(this.lastAppliedTerm);
+        //设置当前配置到metaBuilder
+        final ConfigurationEntry confEntry = this.logManager.getConfiguration(lastAppliedIndex);
+        if (confEntry == null || confEntry.isEmpty()) {
+            LOG.error("Empty conf entry for lastAppliedIndex={}", lastAppliedIndex);
+            Utils.runClosureInThread(done, new Status(RaftError.EINVAL, "Empty conf entry for lastAppliedIndex=%s",
+                    lastAppliedIndex));
+            return;
+        }
+
+        for (final PeerId peer : confEntry.getConf()) {
+            metaBuilder.addPeers(peer.toString());
+        }
+        for (final PeerId peer : confEntry.getConf().getLearners()) {
+            metaBuilder.addLearners(peer.toString());
+        }
+        if (confEntry.getOldConf() != null) {
+            for (final PeerId peer : confEntry.getOldConf()) {
+                metaBuilder.addOldPeers(peer.toString());
+            }
+            for (final PeerId peer : confEntry.getOldConf().getLearners()) {
+                metaBuilder.addOldLearners(peer.toString());
+            }
+        }
+
+        //设置元数据到done实例中
+        final SnapshotWriter writer = done.start(metaBuilder.build());
+        if (writer == null) {
+            done.run(new Status(RaftError.EINVAL, "snapshot_storage create SnapshotWriter failed"));
+            return;
+        }
+
+        //调用状态机的实例生成快照
+        this.fsm.onSnapshotSave(writer, done);
+    }
 }

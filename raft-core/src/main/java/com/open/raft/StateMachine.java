@@ -2,9 +2,11 @@
 package com.open.raft;
 
 
+import com.open.raft.conf.Configuration;
 import com.open.raft.entity.LeaderChangeContext;
 import com.open.raft.error.RaftException;
 import com.open.raft.storage.snapshot.SnapshotReader;
+import com.open.raft.storage.snapshot.SnapshotWriter;
 
 /**
  * |StateMachine| is the sink of all the events of a very raft node.
