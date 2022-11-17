@@ -55,11 +55,13 @@ import com.open.raft.storage.RaftMetaStorage;
 import com.open.raft.storage.impl.LogManagerImpl;
 import com.open.raft.storage.snapshot.SnapshotExecutor;
 import com.open.raft.storage.snapshot.SnapshotExecutorImpl;
+import com.open.raft.util.RaftUtils;
 import com.open.raft.util.RepeatedTimer;
 import com.open.raft.util.Requires;
 import com.open.raft.util.RpcFactoryHelper;
 import com.open.raft.util.Utils;
 import com.open.raft.util.concurrent.NodeReadWriteLock;
+import com.open.raft.util.timer.RaftTimerFactory;
 import org.apache.commons.lang.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -95,7 +97,7 @@ public class NodeImpl implements INode, RaftServerService {
      */
     private volatile int electionTimeoutCounter;
 
-    public final static RaftTimerFactory TIMER_FACTORY = JRaftUtils
+    public final static RaftTimerFactory TIMER_FACTORY = RaftUtils
             .raftTimerFactory();
 
     /**
@@ -1120,6 +1122,23 @@ public class NodeImpl implements INode, RaftServerService {
 
     @Override
     public Message handleInstallSnapshot(RpcRequests.InstallSnapshotRequest request, RpcRequestClosure done) {
+        // 如果快照安装执行器不存在，则抛出异常不支持快照操作
+        if (this.snapshotExecutor == null) {
+            return RpcFactoryHelper //
+                    .responseFactory() //
+                    .newResponse(RpcRequests.InstallSnapshotResponse.getDefaultInstance(), RaftError.EINVAL, "Not supported snapshot");
+        }
+        // 根据请求携带的 serverId 序列化 PeerId
+        final PeerId serverId = new PeerId();
+        if (!serverId.parse(request.getServerId())) {
+            LOG.warn("Node {} ignore InstallSnapshotRequest from {} bad server id.", getNodeId(), request.getServerId());
+            return RpcFactoryHelper //
+                    .responseFactory() //
+                    .newResponse(RpcRequests.InstallSnapshotResponse.getDefaultInstance(), RaftError.EINVAL,
+                            "Parse serverId failed: %s", request.getServerId());
+        }
+
+        this.writeLock.lock();
         return null;
     }
 
@@ -1200,7 +1219,7 @@ public class NodeImpl implements INode, RaftServerService {
                 final List<PeerId> peers = this.conf.getConf().getPeers();
                 Requires.requireTrue(peers != null && !peers.isEmpty(), "Empty peers");
                 final ReadIndexHeartbeatResponseClosure heartbeatDone = new ReadIndexHeartbeatResponseClosure(
-                        respBuilder,closure, quorum, peers.size());
+                        respBuilder, closure, quorum, peers.size());
                 // Send heartbeat requests to followers
                 // 线性安全读的模式，需要向所有的成员发送心跳信息
                 for (final PeerId peer : peers) {
@@ -1691,6 +1710,7 @@ public class NodeImpl implements INode, RaftServerService {
 
     /**
      * 节点发生错误时
+     *
      * @param error
      */
     public void onError(final RaftException error) {

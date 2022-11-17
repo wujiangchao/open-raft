@@ -1,26 +1,11 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements.  See the NOTICE file distributed with
- * this work for additional information regarding copyright ownership.
- * The ASF licenses this file to You under the Apache License, Version 2.0
- * (the "License"); you may not use this file except in compliance with
- * the License.  You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+
 package com.open.raft.util;
 
 import com.alipay.remoting.NamedThreadFactory;
-import com.alipay.sofa.jraft.util.timer.HashedWheelTimer;
-import com.alipay.sofa.jraft.util.timer.Timeout;
-import com.alipay.sofa.jraft.util.timer.Timer;
-import com.alipay.sofa.jraft.util.timer.TimerTask;
+import com.open.raft.util.timer.Timeout;
+import com.open.raft.util.timer.Timer;
+import com.open.raft.util.timer.TimerTask;
+import io.netty.util.HashedWheelTimer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -40,9 +25,13 @@ public abstract class RepeatedTimer implements Describer {
     public static final Logger LOG = LoggerFactory.getLogger(RepeatedTimer.class);
 
     private final Lock lock = new ReentrantLock();
-    //timer是HashedWheelTimer
+    /**
+     * timer是HashedWheelTimer
+     */
     private final Timer timer;
-    //实例是HashedWheelTimeout
+    /**
+     * 实例是HashedWheelTimeout
+     */
     private Timeout timeout;
     private boolean stopped;
     private volatile boolean running;
