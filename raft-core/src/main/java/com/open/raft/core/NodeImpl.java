@@ -1139,7 +1139,62 @@ public class NodeImpl implements INode, RaftServerService {
         }
 
         this.writeLock.lock();
-        return null;
+
+        try{
+            if (!this.state.isActive()) {
+                LOG.warn("Node {} ignore InstallSnapshotRequest as it is not in active state {}.", getNodeId(),
+                        this.state);
+                return RpcFactoryHelper //
+                        .responseFactory() //
+                        .newResponse(RpcRequests.InstallSnapshotResponse.getDefaultInstance(), RaftError.EINVAL,
+                                "Node %s:%s is not in active state, state %s.", this.groupId, this.serverId, this.state.name());
+            }
+
+            // 判断 request 携带的 term 比当前节点的 trem小，比较 term 的合法性
+            if (request.getTerm() < this.currTerm) {
+                LOG.warn("Node {} ignore stale InstallSnapshotRequest from {}, term={}, currTerm={}.", getNodeId(),
+                        request.getPeerId(), request.getTerm(), this.currTerm);
+                return RpcRequests.InstallSnapshotResponse.newBuilder() //
+                        .setTerm(this.currTerm) //
+                        .setSuccess(false) //
+                        .build();
+            }
+
+            //当前节点如果不是Follower节点的话要执行StepDown操作
+            checkStepDown(request.getTerm(), serverId);
+
+            //这说明请求的节点不是当前节点的leader
+            if (!serverId.equals(this.leaderId)) {
+                LOG.error("Another peer {} declares that it is the leader at term {} which was occupied by leader {}.",
+                        serverId, this.currTerm, this.leaderId);
+                // Increase the term by 1 and make both leaders step down to minimize the
+                // loss of split brain
+                stepDown(request.getTerm() + 1, false, new Status(RaftError.ELEADERCONFLICT,
+                        "More than one leader in the same term."));
+                return RpcRequests.InstallSnapshotResponse.newBuilder() //
+                        .setTerm(request.getTerm() + 1) //
+                        .setSuccess(false) //
+                        .build();
+            }
+        }finally {
+            this.writeLock.unlock();
+        }
+        final long startMs = Utils.monotonicMs();
+
+        try {
+                if (LOG.isInfoEnabled()) {
+                    LOG.info(
+                            "Node {} received InstallSnapshotRequest from {}, lastIncludedLogIndex={}, lastIncludedLogTerm={}, lastLogId={}.",
+                            getNodeId(), request.getServerId(), request.getMeta().getLastIncludedIndex(), request.getMeta()
+                                    .getLastIncludedTerm(), this.logManager.getLastLogId(false));
+                }
+
+                // 执行快照安装
+                this.snapshotExecutor.installSnapshot(request, RpcRequests.InstallSnapshotResponse.newBuilder(), done);
+                return null;
+        }finally {
+            this.metrics.recordLatency("install-snapshot", Utils.monotonicMs() - startMs);
+        }
     }
 
     @Override

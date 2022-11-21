@@ -84,6 +84,24 @@ public enum RaftError {
 
 
     /**
+     * <pre>
+     * Follower(without leader) or Candidate Receives
+     * </pre>
+     * <p>
+     * <code>ENEWLEADER = 10011;</code>
+     */
+    ENEWLEADER(10011),
+
+    /**
+     * <pre>
+     * Append_entries/Install_snapshot Request from a new leader
+     * </pre>
+     * <p>
+     * <code>ELEADERCONFLICT = 10012;</code>
+     */
+    ELEADERCONFLICT(10012),
+
+    /**
      * All Kinds of Timeout(Including Election_timeout, Timeout_now, Stepdown_timeout)
      */
     ERAFTTIMEDOUT(10001);

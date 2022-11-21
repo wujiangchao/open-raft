@@ -6,6 +6,7 @@ import com.open.raft.util.Constants;
 import com.open.raft.util.Copiable;
 import com.open.raft.util.CrcUtil;
 import com.open.raft.util.Endpoint;
+import com.open.raft.util.Utils;
 import org.apache.commons.lang.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

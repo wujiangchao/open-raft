@@ -4,12 +4,14 @@ import com.open.raft.Closure;
 import com.open.raft.FSMCaller;
 import com.open.raft.Status;
 import com.open.raft.core.NodeImpl;
+import com.open.raft.entity.RaftOutter;
 import com.open.raft.error.RaftError;
 import com.open.raft.option.SnapshotExecutorOptions;
 import com.open.raft.rpc.RpcRequestClosure;
 import com.open.raft.rpc.RpcRequests;
 import com.open.raft.storage.LogManager;
 import com.open.raft.storage.SnapshotStorage;
+import com.open.raft.util.Requires;
 import com.open.raft.util.Utils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -35,6 +37,7 @@ public class SnapshotExecutorImpl implements SnapshotExecutor {
     private volatile boolean savingSnapshot;
     private volatile boolean loadingSnapshot;
     private volatile boolean stopped;
+    private SnapshotCopier curCopier;
 
     private FSMCaller fsmCaller;
     private NodeImpl node;
@@ -121,8 +124,58 @@ public class SnapshotExecutorImpl implements SnapshotExecutor {
 
     @Override
     public void installSnapshot(RpcRequests.InstallSnapshotRequest request, RpcRequests.InstallSnapshotResponse.Builder response, RpcRequestClosure done) {
+        final RaftOutter.SnapshotMeta meta = request.getMeta();
+        // 创建一个下载快照的任务对象
+        final DownloadingSnapshot ds = new DownloadingSnapshot(request, response, done);
+        // DON'T access request, response, and done after this point
+        // as the retry snapshot will replace this one.
 
+        // 将下载快照任务进行注册
+        if (!registerDownloadingSnapshot(ds)) {
+            LOG.warn("Fail to register downloading snapshot.");
+            // This RPC will be responded by the previous session
+            return;
+        }
+        Requires.requireNonNull(this.curCopier, "curCopier");
+        try {
+            // 阻塞等待 copy 任务完成
+            this.curCopier.join();
+        } catch (final InterruptedException e) {
+            // 中断补偿，如果 curCopier 任务被中断过，表明有更新的 snapshot 在接受了，旧的 snapshot 被停止下载
+            Thread.currentThread().interrupt();
+            LOG.warn("Install snapshot copy job was canceled.");
+            return;
+        }
+        // 装载下载好的 snapshot 文件
+        loadDownloadingSnapshot(ds, meta);
     }
+
+    boolean registerDownloadingSnapshot(final DownloadingSnapshot ds) {
+        DownloadingSnapshot saved = null;
+        boolean result = true;
+        this.lock.lock();
+        try {
+
+        } finally {
+
+        }
+        return result;
+    }
+
+    static class DownloadingSnapshot {
+        RpcRequests.InstallSnapshotRequest request;
+        RpcRequests.InstallSnapshotResponse.Builder responseBuilder;
+        RpcRequestClosure done;
+
+        public DownloadingSnapshot(final RpcRequests.InstallSnapshotRequest request,
+                                   final RpcRequests.InstallSnapshotResponse.Builder responseBuilder, final RpcRequestClosure done) {
+            super();
+            this.request = request;
+            this.responseBuilder = responseBuilder;
+            this.done = done;
+        }
+    }
+
 
     @Override
     public void interruptDownloadingSnapshots(long newTerm) {
