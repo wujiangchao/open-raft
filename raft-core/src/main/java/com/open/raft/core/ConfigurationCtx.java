@@ -24,7 +24,6 @@ import java.util.Set;
 /**
  * Configuration commit context.
  * 该类涉及member changes (增加、删除、修改节点、转移leader)
- *
  */
 public class ConfigurationCtx {
 
@@ -32,25 +31,27 @@ public class ConfigurationCtx {
             .getLogger(ConfigurationCtx.class);
 
     enum Stage {
-        STAGE_NONE, // none stage
+        // none stage
+        STAGE_NONE,
         //如果有追加或更换新节点，需要使新节点日志跟集群同步，复制完成日志后，调用catchUpClosure，下一步
         STAGE_CATCHING_UP, // the node is catching-up
         //将新旧配置复制到Follower，收到大部分回应后，下一步
-        STAGE_JOINT, // joint stage
+        STAGE_JOINT,
         //通知Follower删除旧配置，收到大部分回应后，下一步 STAGE_NONE
-        STAGE_STABLE // stable stage
+        STAGE_STABLE
     }
 
     final NodeImpl node;
     Stage stage;
-    // Peers change times
+    /**
+     * Peers change times
+     */
     int nchanges;
     long version;
-    // peers
     List<PeerId> newPeers = new ArrayList<>();
     List<PeerId> oldPeers = new ArrayList<>();
     List<PeerId> addingPeers = new ArrayList<>();
-    // learners
+
     List<PeerId> newLearners = new ArrayList<>();
     List<PeerId> oldLearners = new ArrayList<>();
     Closure done;
@@ -118,6 +119,9 @@ public class ConfigurationCtx {
         }
     }
 
+    /**
+     * 将Learners加入同步组
+     */
     private void addNewLearners() {
         final Set<PeerId> addingLearners = new HashSet<>(this.newLearners);
         addingLearners.removeAll(this.oldLearners);

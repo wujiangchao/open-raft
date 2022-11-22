@@ -100,6 +100,17 @@ public class Utils {
     }
 
     /**
+     * Run closure with OK status in thread pool.
+     */
+    public static Future<?> runClosureInThread(final Closure done) {
+        if (done == null) {
+            return null;
+        }
+        return runClosureInThread(done, Status.OK());
+    }
+
+
+    /**
      * Returns the current time in milliseconds, it's not monotonic, would be forwarded/backward by
      * clock synchronous.
      */

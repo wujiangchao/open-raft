@@ -141,7 +141,7 @@ public class NodeImpl implements INode, RaftServerService {
     private RaftMetaStorage metaStorage;
     private ClosureQueue closureQueue;
     private BallotBox ballotBox;
-    private ReplicatorGroup replicatorGroup;
+    public ReplicatorGroup replicatorGroup;
     private RaftClientService rpcService;
     private final ConfigurationCtx confCtx;
     private ReadOnlyService readOnlyService;
@@ -1791,5 +1791,46 @@ public class NodeImpl implements INode, RaftServerService {
         } finally {
             this.writeLock.unlock();
         }
+    }
+
+    /**
+     * 成员变更入口
+     * @param oldConf
+     * @param newConf
+     * @param done
+     */
+    private void unsafeRegisterConfChange(final Configuration oldConf, final Configuration newConf, final Closure done) {
+        Requires.requireTrue(newConf.isValid(), "Invalid new conf: %s", newConf);
+        // The new conf entry(will be stored in log manager) should be valid
+        Requires.requireTrue(new ConfigurationEntry(null, newConf, oldConf).isValid(), "Invalid conf entry: %s",
+                newConf);
+
+        if (this.state != State.STATE_LEADER) {
+            LOG.warn("Node {} refused configuration changing as the state={}.", getNodeId(), this.state);
+            if (done != null) {
+                final Status status = new Status();
+                if (this.state == State.STATE_TRANSFERRING) {
+                    status.setError(RaftError.EBUSY, "Is transferring leadership.");
+                } else {
+                    status.setError(RaftError.EPERM, "Not leader");
+                }
+                Utils.runClosureInThread(done, status);
+            }
+            return;
+        }
+        // check concurrent conf change
+        if (this.confCtx.isBusy()) {
+            LOG.warn("Node {} refused configuration concurrent changing.", getNodeId());
+            if (done != null) {
+                Utils.runClosureInThread(done, new Status(RaftError.EBUSY, "Doing another configuration change."));
+            }
+            return;
+        }
+        // Return immediately when the new peers equals to current configuration
+        if (this.conf.getConf().equals(newConf)) {
+            Utils.runClosureInThread(done);
+            return;
+        }
+        this.confCtx.start(oldConf, newConf, done);
     }
 }
