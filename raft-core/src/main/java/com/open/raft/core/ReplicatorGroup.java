@@ -1,5 +1,6 @@
 package com.open.raft.core;
 
+import com.open.raft.closure.CatchUpClosure;
 import com.open.raft.entity.NodeId;
 import com.open.raft.entity.PeerId;
 import com.open.raft.option.ReplicatorGroupOptions;
@@ -100,5 +101,18 @@ public interface ReplicatorGroup {
      * @return true on success
      */
     boolean resetTerm(final long newTerm);
+
+
+    /**
+     * Wait the peer catchup.
+     */
+    boolean waitCaughtUp(final PeerId peer, final long maxMargin, final long dueTime, final CatchUpClosure done);
+
+    /**
+     * Get peer's last rpc send timestamp (monotonic time in milliseconds).
+     *
+     * @param peer the peer of replicator
+     */
+    long getLastRpcSendTimestamp(final PeerId peer);
 
 }

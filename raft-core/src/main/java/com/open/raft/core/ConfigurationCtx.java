@@ -8,6 +8,7 @@ package com.open.raft.core;
 
 import com.open.raft.Closure;
 import com.open.raft.Status;
+import com.open.raft.closure.CatchUpClosure;
 import com.open.raft.conf.Configuration;
 import com.open.raft.entity.PeerId;
 import com.open.raft.error.RaftError;
@@ -92,6 +93,7 @@ public class ConfigurationCtx {
         this.nchanges = adding.size() + removing.size();
 
         addNewLearners();
+        //adding里面放的是当前的减去old,此处表示只删不增
         if (adding.isEmpty()) {
             nextStage();
             return;
@@ -105,6 +107,7 @@ public class ConfigurationCtx {
         for (final PeerId newPeer : this.addingPeers) {
             if (!this.node.replicatorGroup.addReplicator(newPeer)) {
                 LOG.error("Node {} start the replicator failed, peer={}.", this.node.getNodeId(), newPeer);
+                //复制器启动异常，立即放弃追赶
                 onCaughtUp(this.version, newPeer, false);
                 return;
             }
@@ -119,6 +122,33 @@ public class ConfigurationCtx {
         }
     }
 
+
+    /**
+     * Peer catch up callback
+     *
+     * @author boyan (boyan@alibaba-inc.com)
+     * <p>
+     * 2018-Apr-11 2:10:02 PM
+     */
+     static class OnCaughtUp extends CatchUpClosure {
+        private final NodeImpl node;
+        private final long term;
+        private final PeerId peer;
+        private final long version;
+
+        public OnCaughtUp(final NodeImpl node, final long term, final PeerId peer, final long version) {
+            super();
+            this.node = node;
+            this.term = term;
+            this.peer = peer;
+            this.version = version;
+        }
+
+        @Override
+        public void run(final Status status) {
+            this.node.onCaughtUp(this.peer, this.term, this.version, status);
+        }
+    }
     /**
      * 将Learners加入同步组
      */

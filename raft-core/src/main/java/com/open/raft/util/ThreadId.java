@@ -86,4 +86,8 @@ public class ThreadId {
         }
         this.lock.unlock();
     }
+
+    public Object getData() {
+        return this.data;
+    }
 }

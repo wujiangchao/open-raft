@@ -1682,7 +1682,7 @@ public class NodeImpl implements INode, RaftServerService {
      * @param status
      */
     // should be in writeLock
-    private void stepDown(final long term, final boolean wakeupCandidate, final Status status) {
+    public void stepDown(final long term, final boolean wakeupCandidate, final Status status) {
         LOG.debug("Node {} stepDown, term={}, newTerm={}, wakeupCandidate={}.", getNodeId(), this.currTerm, term,
                 wakeupCandidate);
         if (!this.state.isActive()) {
@@ -1832,5 +1832,39 @@ public class NodeImpl implements INode, RaftServerService {
             return;
         }
         this.confCtx.start(oldConf, newConf, done);
+    }
+
+
+    private void onCaughtUp(final PeerId peer, final long term, final long version, final Status st) {
+        this.writeLock.lock();
+        try {
+            // check current_term and state to avoid ABA problem
+            if (term != this.currTerm && this.state != State.STATE_LEADER) {
+                // term has changed and nothing should be done, otherwise there will be
+                // an ABA problem.
+                return;
+            }
+            if (st.isOk()) {
+                // Caught up successfully
+                this.confCtx.onCaughtUp(version, peer, true);
+                return;
+            }
+            // Retry if this peer is still alive
+            if (st.getCode() == RaftError.ETIMEDOUT.getNumber()
+                    && Utils.monotonicMs() - this.replicatorGroup.getLastRpcSendTimestamp(peer) <= this.options
+                    .getElectionTimeoutMs()) {
+                LOG.debug("Node {} waits peer {} to catch up.", getNodeId(), peer);
+                final ConfigurationCtx.OnCaughtUp caughtUp = new ConfigurationCtx.OnCaughtUp(this, term, peer, version);
+                final long dueTime = Utils.nowMs() + this.options.getElectionTimeoutMs();
+                if (this.replicatorGroup.waitCaughtUp(peer, this.options.getCatchupMargin(), dueTime, caughtUp)) {
+                    return;
+                }
+                LOG.warn("Node {} waitCaughtUp failed, peer={}.", getNodeId(), peer);
+            }
+            LOG.warn("Node {} caughtUp failed, status={}, peer={}.", getNodeId(), st, peer);
+            this.confCtx.onCaughtUp(version, peer, false);
+        } finally {
+            this.writeLock.unlock();
+        }
     }
 }

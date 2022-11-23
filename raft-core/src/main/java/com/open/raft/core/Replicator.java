@@ -37,15 +37,13 @@ import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
-import static com.codahale.metrics.MetricRegistry.name;
-
 /**
- * @Description  Replicator for replicating log entry from leader to followers.
+ * @Description Replicator for replicating log entry from leader to followers.
  * @Date 2022/10/11 9:37
  * @Author jack wu
  */
 @ThreadSafe
-public class Replicator  implements ThreadId.OnError {
+public class Replicator implements ThreadId.OnError {
 
     private static final Logger LOG = LoggerFactory.getLogger(Replicator.class);
     private final RaftClientService rpcService;
@@ -239,8 +237,9 @@ public class Replicator  implements ThreadId.OnError {
     }
 
     /**
-     *  Leader 还需向所有 followers 主动发送心跳维持领导地位(保持存在感)
+     * Leader 还需向所有 followers 主动发送心跳维持领导地位(保持存在感)
      * 目的是让 leader 能够持续发送心跳来阻止 followers 触发选举
+     *
      * @param id
      */
     private static void sendHeartbeat(final ThreadId id) {
@@ -258,7 +257,7 @@ public class Replicator  implements ThreadId.OnError {
 
     /**
      * Send probe or heartbeat request
-     *
+     * <p>
      * 首先会调用fillCommonFields方法，填写当前Replicator的配置信息到rb中；
      * 调用prepareEntry，根据当前的I和nextSendingIndex计算出当前的偏移量，然后去LogManager找到对应的LogEntry，
      * 再把LogEntry里面的属性设置到emb中，并把LogEntry里面的数据加入到RecyclableByteBufferList中；
@@ -336,7 +335,7 @@ public class Replicator  implements ThreadId.OnError {
                                         getResponse(), seq, stateVersion, monotonicSendTimeMs);
                             }
 
-                });
+                        });
                 //Inflight 是对批量发送出去的 logEntry 的一种抽象，他表示哪些 logEntry 已经被封装成日志复制 request 发送出去了
                 //这里是将logEntry封装到Inflight中
                 addInflight(RequestType.AppendEntries, this.nextIndex, 0, 0, seq, rpcFuture);
@@ -529,9 +528,9 @@ public class Replicator  implements ThreadId.OnError {
 
     /**
      * 其实就是用来探测各种异常情况，或者探测当前节点的nextIndex。
-     *
+     * <p>
      * 什么时候发送探测消息？
-     *
+     * <p>
      * 节点刚成为leader（start）
      * 发送日志超时的时候，会发送探测消息。
      * 如果响应超时，如果jraft打开pipeline，会有一个pendingResponses阈值。如果响应队列数据大于这个值会调用该方法，并不会在响应超时的时候，无限loop。
@@ -1007,7 +1006,6 @@ public class Replicator  implements ThreadId.OnError {
     }
 
 
-
     // In-flight request type
     enum RequestType {
         Snapshot, // install snapshot
@@ -1375,4 +1373,49 @@ public class Replicator  implements ThreadId.OnError {
         }
     }
 
+    public static void waitForCaughtUp(final ThreadId id, final long maxMargin, final long dueTime,
+                                       final CatchUpClosure done) {
+        final Replicator r = (Replicator) id.lock();
+
+        if (r == null) {
+            RpcUtils.runClosureInThread(done, new Status(RaftError.EINVAL, "No such replicator"));
+            return;
+        }
+        try {
+            if (r.catchUpClosure != null) {
+                LOG.error("Previous wait_for_caught_up is not over");
+                Utils.runClosureInThread(done, new Status(RaftError.EINVAL, "Duplicated call"));
+                return;
+            }
+            done.setMaxMargin(maxMargin);
+            if (dueTime > 0) {
+                done.setTimer(r.timerManager.schedule(() -> onCatchUpTimedOut(id), dueTime - Utils.nowMs(),
+                        TimeUnit.MILLISECONDS));
+            }
+            r.catchUpClosure = done;
+        } finally {
+            id.unlock();
+        }
+    }
+
+
+    private static void onCatchUpTimedOut(final ThreadId id) {
+        final Replicator r = (Replicator) id.lock();
+        if (r == null) {
+            return;
+        }
+        try {
+            r.notifyOnCaughtUp(RaftError.ETIMEDOUT.getNumber(), false);
+        } finally {
+            id.unlock();
+        }
+    }
+
+    public static long getLastRpcSendTimestamp(final ThreadId id) {
+        final Replicator r = (Replicator) id.getData();
+        if (r == null) {
+            return 0L;
+        }
+        return r.lastRpcSendTimestamp;
+    }
 }

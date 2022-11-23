@@ -1,5 +1,6 @@
 package com.open.raft.core;
 
+import com.open.raft.closure.CatchUpClosure;
 import com.open.raft.entity.NodeId;
 import com.open.raft.entity.PeerId;
 import com.open.raft.option.RaftOptions;
@@ -124,5 +125,25 @@ public class ReplicatorGroupImpl implements ReplicatorGroup {
         }
         this.commonOptions.setTerm(newTerm);
         return true;
+    }
+
+    @Override
+    public boolean waitCaughtUp(PeerId peer, long maxMargin, long dueTime, CatchUpClosure done) {
+        final ThreadId rid = this.replicatorMap.get(peer);
+        if (rid == null) {
+            return false;
+        }
+
+        Replicator.waitForCaughtUp(rid, maxMargin, dueTime, done);
+        return true;
+    }
+
+    @Override
+    public long getLastRpcSendTimestamp(PeerId peer) {
+        final ThreadId rid = this.replicatorMap.get(peer);
+        if (rid == null) {
+            return 0L;
+        }
+        return Replicator.getLastRpcSendTimestamp(rid);
     }
 }
