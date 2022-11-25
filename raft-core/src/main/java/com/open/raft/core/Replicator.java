@@ -39,6 +39,7 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * @Description Replicator for replicating log entry from leader to followers.
+ * 每个非Leader节点都独享一个Replicator
  * @Date 2022/10/11 9:37
  * @Author jack wu
  */
@@ -170,11 +171,13 @@ public class Replicator implements ThreadId.OnError {
     }
 
 
+
     private void startHeartbeatTimer(final long startMs) {
         //当前毫秒数
         final long dueTime = startMs + this.options.getDynamicHeartBeatTimeoutMs();
         try {
             //心跳被作为一种超时异常处理。heartbeat为了不重复发送选择定时而非周期Timer，直到收到响应后再次计时发送。
+            //心跳时间间隔要远小于选举时间间隔，避免频繁选举超时，阻止fellow变为candidate,否则很快会进入新一轮的选举，系统很难收敛于稳定状态
             this.heartbeatTimer = this.timerManager.schedule(() -> onTimeout(this.id), dueTime - Utils.nowMs(),
                     TimeUnit.MILLISECONDS);
         } catch (final Exception e) {
@@ -256,8 +259,8 @@ public class Replicator implements ThreadId.OnError {
     }
 
     /**
-     * Send probe or heartbeat request
-     * <p>
+     * Send probe or heartbeat request ,send by leader
+     *
      * 首先会调用fillCommonFields方法，填写当前Replicator的配置信息到rb中；
      * 调用prepareEntry，根据当前的I和nextSendingIndex计算出当前的偏移量，然后去LogManager找到对应的LogEntry，
      * 再把LogEntry里面的属性设置到emb中，并把LogEntry里面的数据加入到RecyclableByteBufferList中；

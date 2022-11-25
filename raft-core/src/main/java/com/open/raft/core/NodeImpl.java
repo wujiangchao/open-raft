@@ -205,16 +205,13 @@ public class NodeImpl implements INode, RaftServerService {
 
         /**
          * voteTimer是用来控制选举的，如果选举超时，当前的节点又是候选者角色，那么就会发起选举。
-         *  electionTimer是预投票计时器。候选者在发起投票之前，先发起预投票，如果没有得到半数以上节点的反馈，则候选者就会识趣的放弃参选。
-         *  stepDownTimer定时检查是否需要重新选举leader。当前的leader可能出现它的Follower可能并没有整个集群的1/2却还没有下台的情况，那么这个时候会定期的检查看leader的Follower是否有那么多，没有那么多的话会强制让leader下台。
-         *  snapshotTimer快照计时器。这个计时器会每隔1小时触发一次生成一个快照。
-         *
-         * 这些计时器的具体实现现在暂时不表，等到要讲具体功能的时候再进行梳理。
-         *
-         * 这些计时器有一个共同的特点就是会根据不同的计时器返回一个在一定范围内随机的时间。返回一个随机的时间可以防止多个节点在同一时间内同时发起投票选举从而降低选举失败的概率。
+         * electionTimer是预投票计时器。候选者在发起投票之前，先发起预投票，如果没有得到半数以上节点的反馈，则候选者就会识趣的放弃参选。
+         * stepDownTimer定时检查是否需要重新选举leader。当前的leader可能出现它的Follower可能并没有整个集群的1/2却还没有下台的情况，那么这个时候会定期的检查看leader的Follower是否有那么多，没有那么多的话会强制让leader下台。
+         * snapshotTimer快照计时器。这个计时器会每隔1小时触发一次生成一个快照。
+         * 这些计时器有一个共同的特点就是会根据不同的计时器返回一个在一定范围内随机的时间。
+         * 返回一个随机的时间可以防止多个节点在同一时间内同时发起投票选举从而降低选举失败的概率。
          */
 
-        // Init timers
         final String suffix = getNodeId().toString();
         String name = "JRaft-VoteTimer-" + suffix;
         //用来控制选举
@@ -248,8 +245,7 @@ public class NodeImpl implements INode, RaftServerService {
 
             @Override
             protected int adjustTimeout(final int timeoutMs) {
-                //在一定范围内返回一个随机的时间戳
-                //为了避免同时发起选举而导致失败
+                //在一定范围内返回一个随机的时间戳,尽量使每个fellow的ElectionTime不一样，为了避免同时发起选举而导致失败
                 return randomTimeout(timeoutMs);
             }
         };
@@ -1056,7 +1052,7 @@ public class NodeImpl implements INode, RaftServerService {
                 LOG.warn("Node {} received AppendEntriesRequest but log manager is busy.", getNodeId());
                 return RpcFactoryHelper //
                         .responseFactory() //
-                        .newResponse(AppendEntriesResponse.getDefaultInstance(), RaftError.EBUSY,
+                        .newResponse(RpcRequests.AppendEntriesResponse.getDefaultInstance(), RaftError.EBUSY,
                                 "Node %s:%s log manager is busy.", this.groupId, this.serverId);
             }
 
@@ -1096,7 +1092,7 @@ public class NodeImpl implements INode, RaftServerService {
             }
 
             //存储日志，并回调返回response
-            final FollowerStableClosure closure = new FollowerStableClosure(request, AppendEntriesResponse.newBuilder()
+            final FollowerStableClosure closure = new FollowerStableClosure(request, RpcRequests.AppendEntriesResponse.newBuilder()
                     .setTerm(this.currTerm), this, done, this.currTerm);
             this.logManager.appendEntries(entries, closure);
             // update configuration after _log_manager updated its memory status
@@ -1481,7 +1477,7 @@ public class NodeImpl implements INode, RaftServerService {
                 continue;
             }
             LOG.debug("Node {} add a replicator, term={}, peer={}.", getNodeId(), this.currTerm, peer);
-            //如果成为leader，那么需要把自己的日志信息复制到其他节点
+            //如果成为leader，那么需要把自己的日志信息复制到其他节点，包括发送心跳
             if (!this.replicatorGroup.addReplicator(peer)) {
                 LOG.error("Fail to add a replicator, peer={}.", peer);
             }
@@ -1866,5 +1862,39 @@ public class NodeImpl implements INode, RaftServerService {
         } finally {
             this.writeLock.unlock();
         }
+    }
+
+    // Should in lock
+    private List<RepeatedTimer> stopAllTimers() {
+        final List<RepeatedTimer> timers = new ArrayList<>();
+        if (this.electionTimer != null) {
+            this.electionTimer.stop();
+            timers.add(this.electionTimer);
+        }
+        if (this.voteTimer != null) {
+            this.voteTimer.stop();
+            timers.add(this.voteTimer);
+        }
+        if (this.stepDownTimer != null) {
+            this.stepDownTimer.stop();
+            timers.add(this.stepDownTimer);
+        }
+        if (this.snapshotTimer != null) {
+            this.snapshotTimer.stop();
+            timers.add(this.snapshotTimer);
+        }
+        return timers;
+    }
+
+
+    /**
+     *   Should be in readLock
+     */
+    private boolean isLearner() {
+        return this.conf.listLearners().contains(this.serverId);
+    }
+
+    private int randomTimeout(final int timeoutMs) {
+        return ThreadLocalRandom.current().nextInt(timeoutMs, timeoutMs + this.raftOptions.getMaxElectionDelayMs());
     }
 }

@@ -1,6 +1,5 @@
 package com.open.raft.util.timer;
 
-import io.netty.util.Timeout;
 
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
