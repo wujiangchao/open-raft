@@ -258,6 +258,8 @@ public class Replicator implements ThreadId.OnError {
         sendEmptyEntries(isHeartbeat, null);
     }
 
+
+
     /**
      * Send probe or heartbeat request ,send by leader
      *
