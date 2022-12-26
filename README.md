@@ -7,6 +7,15 @@
 raft协议：https://raft.github.io/
 
 #### Leader election
+leader 选举：Term最大、log最完整
+
+随机选举超时时间避免冲突
+
+prevote的必要性？
+
+每次新增节点为什么要重新选举？
+
+新加入一个节点term值取什么？
 
 #### Log Replication and Recovery
 
