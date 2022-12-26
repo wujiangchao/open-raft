@@ -18,6 +18,25 @@ prevote的必要性？
 新加入一个节点term值取什么？
 
 #### Log Replication and Recovery
+快照用途
+
+1. JRaft新节点加入后，如何快速追上最新的数据
+2. Raft 节点出现故障重新启动后如何高效恢复到最新的数据
+
+
+
+主要参与组件：
+
+Replicator: Leader节点通过复制器发起安装快照文件请求
+
+NodeImpl：Follower节点接收安装请求
+
+SnapshotExecutorImpl：注册新的快照文件下载任务，开始从 Leader 节点下载快照文件，并阻塞等待下载过程的完成
+
+FSMCallerImpl：将快照数据透传给业务，并由业务决定如何在本地恢复快照所蕴含的状态数据
+
+StateMachine：获取快照文件对应的元数据信息， 加载快照数据，并更新数据值
+
 
 #### Snapshot and log Compaction
 
